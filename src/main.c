@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "commands.h"
 #include "http_client.h"
 #include "openai_client.h"
 #include "session_context.h"
@@ -155,11 +156,31 @@ int main(void) {
         return 1;
     }
 
+    if (commands_init() != 0) {
+        fprintf(stderr, "emma: failed to initialize command registry\n");
+        session_context_free(&context);
+        config_free_strings(&config);
+        http_client_cleanup();
+        return 1;
+    }
+
     tui_render(tui);
 
     while (1) {
         char *input = tui_read_input(tui);
         if (!input) break;
+
+        char feedback[256];
+        cmd_result_t cres = commands_dispatch(input, feedback, sizeof feedback);
+        if (cres == CMD_EXIT) {
+            free(input);
+            break;
+        }
+        if (cres == CMD_HANDLED) {
+            tui_append_message(tui, "system", feedback);
+            free(input);
+            continue;
+        }
 
         if (session_context_add_message(&context, "user", input) != 0) {
             free(input);
@@ -188,5 +209,6 @@ int main(void) {
     session_context_free(&context);
     config_free_strings(&config);
     http_client_cleanup();
+    commands_free();
     return 0;
 }

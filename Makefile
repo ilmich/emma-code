@@ -7,7 +7,8 @@ TESTDIR := tests
 TESTBIN := $(BUILDDIR)/tests
 
 SOURCES := $(SRCDIR)/main.c $(SRCDIR)/http_client.c $(SRCDIR)/openai_client.c \
-	$(SRCDIR)/session_context.c $(SRCDIR)/tui.c $(SRCDIR)/toml.c
+	$(SRCDIR)/session_context.c $(SRCDIR)/tui.c $(SRCDIR)/toml.c \
+	$(SRCDIR)/commands.c
 OBJECTS := $(SOURCES:$(SRCDIR)/%.c=$(BUILDDIR)/%.o)
 
 all: $(TARGET)
@@ -27,7 +28,7 @@ clean:
 # Compile and run the unit tests. The network suite uses the local mock
 # OpenAI server started by tests/run_tests.sh.
 test: $(TESTBIN)/test_session_context $(TESTBIN)/test_openai_client \
-	$(TESTBIN)/test_http_client $(TESTBIN)/test_toml
+	$(TESTBIN)/test_http_client $(TESTBIN)/test_toml $(TESTBIN)/test_commands
 	$(TESTDIR)/run_tests.sh
 
 # Enforce the repo layout rules: every src/*.c (except main.c) must have a
@@ -63,5 +64,8 @@ $(TESTBIN)/test_http_client: $(TESTDIR)/test_http_client.c $(TESTDIR)/test.h $(B
 
 $(TESTBIN)/test_toml: $(TESTDIR)/test_toml.c $(TESTDIR)/test.h $(BUILDDIR)/toml.o | $(TESTBIN)
 	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_toml.c $(BUILDDIR)/toml.o -o $@
+
+$(TESTBIN)/test_commands: $(TESTDIR)/test_commands.c $(TESTDIR)/test.h $(BUILDDIR)/commands.o | $(TESTBIN)
+	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_commands.c $(BUILDDIR)/commands.o -o $@
 
 .PHONY: all clean test check
