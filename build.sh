@@ -41,6 +41,7 @@ SOURCES=(
     "${SRC_DIR}/toml.c"
     "${SRC_DIR}/commands.c"
     "${SRC_DIR}/lua_scripting.c"
+    "${SRC_DIR}/agent_loop.c"
 )
 
 # Object files mapping

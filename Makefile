@@ -26,7 +26,7 @@ TESTBIN := $(BUILDDIR)/tests
 
 SOURCES := $(SRCDIR)/main.c $(SRCDIR)/http_client.c $(SRCDIR)/openai_client.c \
 	$(SRCDIR)/session_context.c $(SRCDIR)/tui.c $(SRCDIR)/toml.c \
-	$(SRCDIR)/commands.c $(SRCDIR)/lua_scripting.c
+	$(SRCDIR)/commands.c $(SRCDIR)/lua_scripting.c $(SRCDIR)/agent_loop.c
 OBJECTS := $(SOURCES:$(SRCDIR)/%.c=$(BUILDDIR)/%.o)
 
 all: $(TARGET)
@@ -47,7 +47,7 @@ clean:
 # OpenAI server started by tests/run_tests.sh.
 test: $(TESTBIN)/test_session_context $(TESTBIN)/test_openai_client \
 	$(TESTBIN)/test_http_client $(TESTBIN)/test_toml $(TESTBIN)/test_commands \
-	$(TESTBIN)/test_lua_scripting $(TESTBIN)/test_tui
+	$(TESTBIN)/test_lua_scripting $(TESTBIN)/test_tui $(TESTBIN)/test_agent_loop
 	$(TESTDIR)/run_tests.sh
 
 # Enforce the repo layout rules: every src/*.c (except main.c) must have a
@@ -92,5 +92,12 @@ $(TESTBIN)/test_lua_scripting: $(TESTDIR)/test_lua_scripting.c $(TESTDIR)/test.h
 
 $(TESTBIN)/test_tui: $(TESTDIR)/test_tui.c $(TESTDIR)/test.h $(BUILDDIR)/tui.o | $(TESTBIN)
 	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_tui.c $(BUILDDIR)/tui.o -o $@
+
+$(TESTBIN)/test_agent_loop: $(TESTDIR)/test_agent_loop.c $(TESTDIR)/test.h \
+		$(BUILDDIR)/agent_loop.o $(BUILDDIR)/openai_client.o $(BUILDDIR)/http_client.o \
+		$(BUILDDIR)/session_context.o $(BUILDDIR)/tui.o | $(TESTBIN)
+	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_agent_loop.c \
+		$(BUILDDIR)/agent_loop.o $(BUILDDIR)/openai_client.o $(BUILDDIR)/http_client.o \
+		$(BUILDDIR)/session_context.o $(BUILDDIR)/tui.o -o $@ $(CURL_LIBS) $(CJSON_LIBS)
 
 .PHONY: all clean test check

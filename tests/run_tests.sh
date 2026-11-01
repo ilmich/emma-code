@@ -46,6 +46,7 @@ export TEST_MOCK_PORT
 
 ./build/tests/test_http_client || status=1
 ./build/tests/test_openai_client || status=1
+./build/tests/test_agent_loop || status=1
 
 if [ "$status" -eq 0 ]; then
     echo "All test suites passed"

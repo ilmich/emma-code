@@ -1,12 +1,14 @@
 /**
  * @file main.c
- * @brief emma-code entry point: config loading, TUI setup, chat loop.
+ * @brief emma-code entry point: config loading, TUI setup, command
+ *        dispatch and wiring of the agentic chat loop (src/agent_loop.c).
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "agent_loop.h"
 #include "commands.h"
 #include "http_client.h"
 #include "lua_scripting.h"
@@ -227,6 +229,12 @@ int main(void) {
     free(scripts_dir);
     scripts_dir = NULL;
 
+    /* Agentic loop context: all pointers are borrowed by agent_loop. */
+    agent_loop_t loop = {0};
+    loop.config = &config;
+    loop.session = &context;
+    loop.tui = tui;
+
     tui_render(tui);
 
     while (1) {
@@ -255,41 +263,30 @@ int main(void) {
             input = hooked;
         }
 
-        if (session_context_add_message(&context, "user", input) != 0) {
-            free(input);
+        /* Send the message and get the raw assistant reply; command
+         * dispatch and hooks stay here, out of agent_loop. */
+        char *reply = NULL;
+        agent_msg_result_t res = agent_loop_handle_message(&loop, input, &reply);
+        if (res == AGENT_MSG_EXIT)
             break;
-        }
-        tui_append_message(tui, "user", input);
-        free(input);
+        if (res == AGENT_MSG_ERROR)
+            continue;
 
-        tui_set_status(tui, "Thinking...");
-
-        openai_response_t response = {0};
-        int result = openai_chat_completion(&config, context.messages, context.count, &response);
-
-        tui_set_status(tui, NULL);
-
-        if (result == 0) {
-            /* post_message hook: fires when the LLM completes its
-             * response, before display; the returned text (if any)
-             * replaces the original in the UI and in the history. */
-            char *final_text = NULL;
-            if (lua_bridge_apply_hook(bridge, LUA_HOOK_POST_MESSAGE,
-                                      response.content,
-                                      &final_text) != 0)
-                final_text = NULL;
-            const char *text = final_text != NULL ? final_text
-                                                  : response.content;
-            tui_append_message(tui, "assistant", text);
-            if (session_context_add_message(&context, "assistant", text) != 0)
-                tui_append_message(tui, "system",
-                                   "[Warning: failed to store assistant "
-                                   "message in history]");
-            free(final_text);
-            openai_response_free(&response);
-        } else {
-            tui_append_message(tui, "assistant", "[Error: failed to get response]");
-        }
+        /* post_message hook: fires when the LLM completes its response,
+         * before display; the returned text (if any) replaces the
+         * original in the UI and in the history. */
+        char *final_text = NULL;
+        if (lua_bridge_apply_hook(bridge, LUA_HOOK_POST_MESSAGE, reply,
+                                  &final_text) != 0)
+            final_text = NULL;
+        const char *text = final_text != NULL ? final_text : reply;
+        tui_append_message(tui, "assistant", text);
+        if (session_context_add_message(&context, "assistant", text) != 0)
+            tui_append_message(tui, "system",
+                               "[Warning: failed to store assistant "
+                               "message in history]");
+        free(final_text);
+        free(reply);
     }
 
     tui_free(tui);
