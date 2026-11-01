@@ -206,6 +206,7 @@ static void test_parse_rejects_invalid(void)
 		{ "bad escape", "k = \"a\\qb\"\n" },
 		{ "truncated unicode escape", "k = \"\\u12\"\n" },
 		{ "surrogate escape", "k = \"\\uD800\"\n" },
+		{ "nul escape", "k = \"\\u0000\"\n" },
 		{ "trailing garbage", "k = 1 junk\n" },
 		{ "inline table", "k = { a = 1 }\n" },
 		{ "multiline string", "k = \"\"\"abc\"\"\"\n" },
@@ -327,5 +328,8 @@ int main(void)
 	TEST_RUN(test_errbuf_truncation);
 	TEST_RUN(test_parse_file_paths);
 	TEST_RUN(test_null_safety);
+
+	if (test__failures == 0)
+		printf("All toml tests passed\n");
 	return test__failures == 0 ? 0 : 1;
 }

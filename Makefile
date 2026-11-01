@@ -47,12 +47,11 @@ clean:
 # OpenAI server started by tests/run_tests.sh.
 test: $(TESTBIN)/test_session_context $(TESTBIN)/test_openai_client \
 	$(TESTBIN)/test_http_client $(TESTBIN)/test_toml $(TESTBIN)/test_commands \
-	$(TESTBIN)/test_lua_scripting
+	$(TESTBIN)/test_lua_scripting $(TESTBIN)/test_tui
 	$(TESTDIR)/run_tests.sh
 
 # Enforce the repo layout rules: every src/*.c (except main.c) must have a
-# matching include/*.h, and every src/*.c (except main.c and tui.c, a
-# terminal-driven module excluded from automated unit tests) must have a
+# matching include/*.h, and every src/*.c (except main.c) must have a
 # tests/test_*.c.
 check:
 	@status=0; \
@@ -61,8 +60,7 @@ check:
 		if [ "$$base" != "main" ] && [ ! -f include/$$base.h ]; then \
 			echo "check: missing include/$$base.h for $$f"; status=1; \
 		fi; \
-		if [ "$$base" != "main" ] && [ "$$base" != "tui" ] \
-				&& [ ! -f $(TESTDIR)/test_$$base.c ]; then \
+		if [ "$$base" != "main" ] && [ ! -f $(TESTDIR)/test_$$base.c ]; then \
 			echo "check: missing $(TESTDIR)/test_$$base.c for $$f"; status=1; \
 		fi; \
 	done; \
@@ -91,5 +89,8 @@ $(TESTBIN)/test_lua_scripting: $(TESTDIR)/test_lua_scripting.c $(TESTDIR)/test.h
 		$(BUILDDIR)/lua_scripting.o $(BUILDDIR)/commands.o $(BUILDDIR)/tui.o | $(TESTBIN)
 	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_lua_scripting.c \
 		$(BUILDDIR)/lua_scripting.o $(BUILDDIR)/commands.o $(BUILDDIR)/tui.o -o $@ $(LUA_LIBS)
+
+$(TESTBIN)/test_tui: $(TESTDIR)/test_tui.c $(TESTDIR)/test.h $(BUILDDIR)/tui.o | $(TESTBIN)
+	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_tui.c $(BUILDDIR)/tui.o -o $@
 
 .PHONY: all clean test check

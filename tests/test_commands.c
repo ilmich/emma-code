@@ -36,6 +36,16 @@ int main(void)
 {
 	char fb[128];
 
+	/* Regression: a command registered before init() must survive init
+	 * (init used to reset the registry and leak the entry). */
+	TEST_CHECK_INT_EQ(
+		commands_register("early", capture_handler, "early bird", NULL),
+		0);
+	TEST_CHECK_INT_EQ(commands_init(), 0);
+	TEST_CHECK_INT_EQ(commands_dispatch("/early x", fb, sizeof fb),
+			  CMD_HANDLED);
+	TEST_CHECK_STR_EQ(last_name, "early");
+
 	/* init registers the built-in /exit command */
 	TEST_CHECK_INT_EQ(commands_init(), 0);
 	TEST_CHECK_INT_EQ(commands_dispatch("/exit", fb, sizeof fb), CMD_EXIT);

@@ -117,6 +117,53 @@ static void test_http_request_unreachable(void)
 	http_response_free(&resp); /* must tolerate an unfilled response */
 }
 
+/* Regression: CRLF-separated SSE events (\r\n\r\n) must be dispatched
+ * exactly like LF-separated ones, and the trailing \r must be stripped. */
+static void test_http_stream_sse_crlf(void)
+{
+	char url[128];
+	struct http_request_t req = {0};
+	struct http_response_t resp = {0};
+
+	if (build_url(url, sizeof(url), "ssecrlf") != 0) {
+		return;
+	}
+	req.url = url;
+	req.method = (char *)"GET";
+	req.callback = sse_collect;
+
+	memset(&g_collector, 0, sizeof(g_collector));
+
+	TEST_CHECK_INT_EQ(http_request(&req, &resp), 0);
+	TEST_CHECK_INT_EQ(resp.status_code, 200);
+	TEST_CHECK_STR_EQ(g_collector.buf, "firstsecond");
+
+	http_response_free(&resp);
+}
+
+/* Regression: "data:" without a space after the colon is spec-legal. */
+static void test_http_stream_sse_no_space(void)
+{
+	char url[128];
+	struct http_request_t req = {0};
+	struct http_response_t resp = {0};
+
+	if (build_url(url, sizeof(url), "ssespace") != 0) {
+		return;
+	}
+	req.url = url;
+	req.method = (char *)"GET";
+	req.callback = sse_collect;
+
+	memset(&g_collector, 0, sizeof(g_collector));
+
+	TEST_CHECK_INT_EQ(http_request(&req, &resp), 0);
+	TEST_CHECK_INT_EQ(resp.status_code, 200);
+	TEST_CHECK_STR_EQ(g_collector.buf, "firstsecond");
+
+	http_response_free(&resp);
+}
+
 static void test_http_response_free_null_safe(void)
 {
 	/* NULL and double free must not crash. */
@@ -165,6 +212,8 @@ int main(void)
 	TEST_RUN(test_http_request_unreachable);
 	TEST_RUN(test_http_response_free_null_safe);
 	TEST_RUN(test_http_stream_sse);
+	TEST_RUN(test_http_stream_sse_crlf);
+	TEST_RUN(test_http_stream_sse_no_space);
 
 	http_client_cleanup();
 

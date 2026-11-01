@@ -6,9 +6,6 @@
 
 #include <string.h>
 
-// Define constants
-#define MAX_JSON_PAYLOAD_SIZE 4096
-#define MAX_RESPONSE_BODY_SIZE 8192
 #define OPENAI_API_URL "/v1/chat/completions"
 
 /**

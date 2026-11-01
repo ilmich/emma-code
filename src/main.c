@@ -281,7 +281,10 @@ int main(void) {
             const char *text = final_text != NULL ? final_text
                                                   : response.content;
             tui_append_message(tui, "assistant", text);
-            session_context_add_message(&context, "assistant", text);
+            if (session_context_add_message(&context, "assistant", text) != 0)
+                tui_append_message(tui, "system",
+                                   "[Warning: failed to store assistant "
+                                   "message in history]");
             free(final_text);
             openai_response_free(&response);
         } else {

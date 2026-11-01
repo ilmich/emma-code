@@ -271,5 +271,8 @@ int main(void)
 	TEST_RUN(test_hook_runtime_error_pass_through);
 	TEST_RUN(test_full_flow_transforms);
 	commands_free();
+
+	if (test__failures == 0)
+		printf("All lua_scripting tests passed\n");
 	return test__failures != 0;
 }

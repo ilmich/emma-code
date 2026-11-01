@@ -19,6 +19,10 @@ Scenarios are selected by the first path segment, e.g. a request to
                  (e.g. temp0.42); otherwise 400
   sse          - 200 with Content-Type text/event-stream and two
                  "data: " events (GET)
+  ssecrlf      - 200 with Content-Type text/event-stream and two
+                 "data: " events separated by CRLF (GET)
+  ssespace     - 200 with Content-Type text/event-stream and two
+                 "data:" events without a space after the colon (GET)
 
 The server binds to an ephemeral port on 127.0.0.1 and prints the port
 number on stdout (flushed immediately) so the test runner can export it.
@@ -42,6 +46,8 @@ VALID_RESPONSE = {
 }
 
 SSE_BODY = b"data: first\n\ndata: second\n\n"
+SSE_BODY_CRLF = b"data: first\r\n\r\ndata: second\r\n\r\n"
+SSE_BODY_NOSPACE = b"data:first\ndata:second\n\n"
 
 
 def scenario_of(path):
@@ -60,8 +66,13 @@ class MockHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if scenario_of(self.path) == "sse":
+        scenario = scenario_of(self.path)
+        if scenario == "sse":
             self._respond(200, SSE_BODY, "text/event-stream")
+        elif scenario == "ssecrlf":
+            self._respond(200, SSE_BODY_CRLF, "text/event-stream")
+        elif scenario == "ssespace":
+            self._respond(200, SSE_BODY_NOSPACE, "text/event-stream")
         else:
             self._respond(404, b"unknown scenario")
 

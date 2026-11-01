@@ -212,7 +212,7 @@ static int count_lines_for_content(const char *content, int width) {
 }
 
 static int count_input_lines(tui_t *tui) {
-    int label_len = 6;
+    int label_len = 5; /* "You: " is 5 columns */
     int first_line_width = tui->term_cols - label_len;
     if (first_line_width < 1) first_line_width = 1;
 
@@ -299,6 +299,9 @@ static void render_history(tui_t *tui) {
         if (strcmp(role, "assistant") == 0) {
             color = ANSI_BOLD_BLUE;
             label = "Assistant";
+        } else if (strcmp(role, "system") == 0) {
+            color = ANSI_BOLD_YELLOW;
+            label = "  System";
         }
 
         int line_in_msg = 0;
@@ -404,7 +407,7 @@ static void render_input(tui_t *tui) {
     int history_rows = compute_history_rows(tui);
     int input_h      = compute_input_box_height(tui);
     int input_start  = history_rows + 2;
-    int label_len    = 6;
+    int label_len    = 5; /* "You: " is 5 columns */
     int first_width  = tui->term_cols - label_len;
     if (first_width < 1) first_width = 1;
 

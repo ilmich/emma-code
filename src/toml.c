@@ -467,6 +467,13 @@ static int p_basic_string(struct parser *ps, toml_value_t *out)
 				p_err(ps, "surrogate in \\u escape");
 				return -1;
 			}
+			if (cp == 0) {
+				/* Strings are NUL-terminated C strings: an embedded
+				 * NUL would silently truncate every getter. */
+				free(buf);
+				p_err(ps, "NUL in \\u escape");
+				return -1;
+			}
 			if (utf8_put(cp, buf, cap, &len) != 0) {
 				free(buf);
 				p_err(ps, "invalid code point in \\u escape");

@@ -62,9 +62,12 @@ int commands_init(void)
 {
 	if (initialized)
 		return 0;
-	registry = NULL;
-	registry_count = 0;
-	registry_cap = 0;
+	/* Keep entries registered before init (e.g. by early registrants);
+	 * only start from scratch when the registry is empty or freed. */
+	if (registry == NULL) {
+		registry_count = 0;
+		registry_cap = 0;
+	}
 	if (commands_register("exit", exit_handler, "exit emma", NULL) != 0)
 		return -1;
 	initialized = 1;

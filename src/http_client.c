@@ -34,6 +34,37 @@ static int header_is_sse(const char *header) {
     return 0;
 }
 
+/**
+ * Finds the end of the SSE event starting at `p` (i.e. the first blank
+ * line). Line terminators may be LF, CRLF or CR, so "\n\n", "\r\n\r\n"
+ * and mixed "\n\r\n" all terminate an event.
+ *
+ * Returns a pointer just past the blank line, or NULL when the buffer
+ * ends inside a (possibly still incomplete) line terminator: a trailing
+ * CR must not be treated as a boundary because the matching LF may only
+ * arrive with the next chunk.
+ */
+static char *find_event_end(char *p, char *end) {
+    while (p < end) {
+        if (*p == '\n') {
+            return p + 1; /* empty line: event boundary */
+        }
+        if (*p == '\r') {
+            if (p + 1 >= end) {
+                return NULL; /* CRLF possibly split across chunks */
+            }
+            if (p[1] == '\n') {
+                return p + 2;
+            }
+            return p + 1; /* bare CR: empty line */
+        }
+        while (p < end && *p != '\n' && *p != '\r') {
+            p++;
+        }
+    }
+    return NULL;
+}
+
 static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t realsize = size * nmemb;
     struct mem_struct *mem = (struct mem_struct *)userp;
@@ -51,13 +82,14 @@ static size_t write_callback(void *contents, size_t size, size_t nmemb, void *us
 
     if (mem->streaming && mem->callback) {
         while (1) {
-            char *next_newline = strstr(mem->data + mem->last_pos, "\n\n");
-            if (!next_newline) {
+            char *boundary = find_event_end(mem->data + mem->last_pos,
+                                             mem->data + mem->size);
+            if (!boundary) {
                 break;
             }
 
             size_t msg_start = mem->last_pos;
-            size_t msg_end = (next_newline - mem->data) + 2;
+            size_t msg_end = (size_t)(boundary - mem->data);
 
             char *line_ptr = mem->data + msg_start;
             while (line_ptr < mem->data + msg_end) {
@@ -67,16 +99,23 @@ static size_t write_callback(void *contents, size_t size, size_t nmemb, void *us
                 }
 
                 size_t line_len = line_end - line_ptr;
-                if (line_len > 0) {
-                    if (strncmp(line_ptr, "data: ", 6) == 0) {
-                        mem->callback(line_ptr + 6, line_len - 6);
+                /* Strip a trailing CR from CRLF line endings. */
+                if (line_len > 0 && line_ptr[line_len - 1] == '\r') {
+                    line_len--;
+                }
+                /* "data:" with an optional single space, per the SSE spec. */
+                if (line_len >= 5 && strncmp(line_ptr, "data:", 5) == 0) {
+                    size_t off = 5;
+
+                    if (off < line_len && line_ptr[off] == ' ') {
+                        off++;
                     }
+                    mem->callback(line_ptr + off, line_len - off);
                 }
 
-                line_ptr = line_end;
-                while (line_ptr < mem->data + msg_end && (*line_ptr == '\n' || *line_ptr == '\r')) {
-                    line_ptr++;
-                }
+                line_ptr = (line_end < mem->data + msg_end)
+                               ? line_end + 1
+                               : line_end;
             }
 
             mem->last_pos = msg_end;
@@ -163,7 +202,16 @@ int http_request(const struct http_request_t *req, struct http_response_t *resp)
     curl_easy_setopt(curl, CURLOPT_URL, req->url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, " EmmaCode HTTP Client");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "EmmaCode HTTP Client");
+    /* Never hang forever on a stalled connection; a low total timeout
+     * would kill legitimate long-lived LLM responses, so guard with a
+     * connect timeout and a low-speed stall detector instead. */
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+    /* Avoid SIGPIPE/longjmp-based DNS timeouts: the TUI installs its own
+     * signal handlers and must not receive SIGPIPE from libcurl. */
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 
     if (req->method && strcmp(req->method, "POST") == 0) {
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req->body);
