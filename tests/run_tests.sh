@@ -16,6 +16,7 @@ status=0
 
 ./build/tests/test_session_context || status=1
 ./build/tests/test_toml || status=1
+./build/tests/test_lua_scripting || status=1
 
 if ! command -v python3 >/dev/null 2>&1; then
     echo "SKIP network tests: python3 not found" >&2

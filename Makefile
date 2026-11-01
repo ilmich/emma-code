@@ -1,5 +1,14 @@
 CC := gcc
-CFLAGS := -std=c99 -Wall -Wextra -O2 -Iinclude -fanalyzer
+
+# Lua runtime: system liblua via pkg-config (5.4 preferred, 5.3 fallback).
+LUA_PKG := $(shell for p in lua5.4 lua5.3 lua; do pkg-config --exists $$p && echo $$p && break; done)
+ifeq ($(LUA_PKG),)
+$(error Lua development files not found: install liblua5.4-dev (Debian/Ubuntu) or lua-devel (Fedora))
+endif
+LUA_CFLAGS := $(shell pkg-config --cflags $(LUA_PKG))
+LUA_LIBS := $(shell pkg-config --libs $(LUA_PKG))
+
+CFLAGS := -std=c99 -Wall -Wextra -O2 -Iinclude -fanalyzer $(LUA_CFLAGS)
 SRCDIR := src
 BUILDDIR := build
 TARGET := emma-code
@@ -8,13 +17,13 @@ TESTBIN := $(BUILDDIR)/tests
 
 SOURCES := $(SRCDIR)/main.c $(SRCDIR)/http_client.c $(SRCDIR)/openai_client.c \
 	$(SRCDIR)/session_context.c $(SRCDIR)/tui.c $(SRCDIR)/toml.c \
-	$(SRCDIR)/commands.c
+	$(SRCDIR)/commands.c $(SRCDIR)/lua_scripting.c
 OBJECTS := $(SOURCES:$(SRCDIR)/%.c=$(BUILDDIR)/%.o)
 
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS)
-	$(CC) $(OBJECTS) -lcurl -lcjson -o $@
+	$(CC) $(OBJECTS) -lcurl -lcjson $(LUA_LIBS) -o $@
 
 $(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -28,7 +37,8 @@ clean:
 # Compile and run the unit tests. The network suite uses the local mock
 # OpenAI server started by tests/run_tests.sh.
 test: $(TESTBIN)/test_session_context $(TESTBIN)/test_openai_client \
-	$(TESTBIN)/test_http_client $(TESTBIN)/test_toml $(TESTBIN)/test_commands
+	$(TESTBIN)/test_http_client $(TESTBIN)/test_toml $(TESTBIN)/test_commands \
+	$(TESTBIN)/test_lua_scripting
 	$(TESTDIR)/run_tests.sh
 
 # Enforce the repo layout rules: every src/*.c (except main.c) must have a
@@ -67,5 +77,10 @@ $(TESTBIN)/test_toml: $(TESTDIR)/test_toml.c $(TESTDIR)/test.h $(BUILDDIR)/toml.
 
 $(TESTBIN)/test_commands: $(TESTDIR)/test_commands.c $(TESTDIR)/test.h $(BUILDDIR)/commands.o | $(TESTBIN)
 	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_commands.c $(BUILDDIR)/commands.o -o $@
+
+$(TESTBIN)/test_lua_scripting: $(TESTDIR)/test_lua_scripting.c $(TESTDIR)/test.h \
+		$(BUILDDIR)/lua_scripting.o $(BUILDDIR)/commands.o $(BUILDDIR)/tui.o | $(TESTBIN)
+	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_lua_scripting.c \
+		$(BUILDDIR)/lua_scripting.o $(BUILDDIR)/commands.o $(BUILDDIR)/tui.o -o $@ $(LUA_LIBS)
 
 .PHONY: all clean test check

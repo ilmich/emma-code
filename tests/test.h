@@ -51,6 +51,19 @@ static int test__failures = 0;
 		}                                                            \
 	} while (0)
 
+/** Check that two C strings differ (NULL is never different-safe). */
+#define TEST_CHECK_STR_NE(actual, expected)                                  \
+	do {                                                                 \
+		const char *_sa = (actual);                                  \
+		const char *_se = (expected);                                \
+		if (_sa == NULL || _se == NULL || strcmp(_sa, _se) == 0) {   \
+			test__failures++;                                    \
+			fprintf(stderr, "  FAIL %s:%d: %s != \"%s\"\n",      \
+				__FILE__, __LINE__, #actual,                 \
+				_se ? _se : "(null)");                       \
+		}                                                            \
+	} while (0)
+
 /** Check that a pointer is NULL. */
 #define TEST_CHECK_NULL(p) TEST_CHECK((p) == NULL)
 

@@ -8,6 +8,18 @@ INC_DIR="include"
 BINDIR=${BINDIR:-"./"}
 BUILDDIR=${BUILDDIR:-"build"}
 
+# Lua runtime: system liblua via pkg-config (5.4 preferred, 5.3 fallback)
+LUA_PKG=""
+for p in lua5.4 lua5.3 lua; do
+    if pkg-config --exists "$p"; then LUA_PKG="$p"; break; fi
+done
+if [ -z "$LUA_PKG" ]; then
+    echo "Error: Lua development files not found. Install liblua5.4-dev (Debian/Ubuntu) or lua-devel (Fedora)" >&2
+    exit 1
+fi
+LUA_CFLAGS=$(pkg-config --cflags "$LUA_PKG")
+LUA_LIBS=$(pkg-config --libs "$LUA_PKG")
+
 # Source files
 SOURCES=(
     "${SRC_DIR}/main.c"
@@ -16,6 +28,8 @@ SOURCES=(
     "${SRC_DIR}/session_context.c"
     "${SRC_DIR}/tui.c"
     "${SRC_DIR}/toml.c"
+    "${SRC_DIR}/commands.c"
+    "${SRC_DIR}/lua_scripting.c"
 )
 
 # Object files mapping
@@ -41,7 +55,7 @@ for src in "${SOURCES[@]}"; do
     
     # Compile source to object file in the build directory
     # Use -I "$INC_DIR" to include headers from include/
-    $CC $CFLAGS -I "$INC_DIR" -c "$src" -o "$output_obj"
+    $CC $CFLAGS $LUA_CFLAGS -I "$INC_DIR" -c "$src" -o "$output_obj"
     if [ $? -ne 0 ]; then
         echo "Error compiling $src"
         exit 1
@@ -51,7 +65,7 @@ done
 # --- Linking ---
 echo "Linking executable..."
 # Link all object files from the build directory into the final executable
-$CC ${OBJECT_FILES[@]} -o "$BINDIR"/emma-code -lcurl -lcjson
+$CC ${OBJECT_FILES[@]} -o "$BINDIR"/emma-code -lcurl -lcjson $LUA_LIBS
 if [ $? -ne 0 ]; then
     echo "Error linking executable"
     exit 1

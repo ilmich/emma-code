@@ -9,6 +9,7 @@
 
 #include "commands.h"
 #include "http_client.h"
+#include "lua_scripting.h"
 #include "openai_client.h"
 #include "session_context.h"
 #include "toml.h"
@@ -59,15 +60,40 @@ static int config_path(char *buf, size_t buflen)
 }
 
 /**
+ * Builds the default scripts directory: $XDG_CONFIG_HOME/emma/scripts,
+ * or ~/.config/emma/scripts when XDG_CONFIG_HOME is unset.
+ * Returns 0 on success, -1 when the path does not fit the buffer.
+ */
+static int scripts_dir_default(char *buf, size_t buflen)
+{
+	const char *xdg = getenv("XDG_CONFIG_HOME");
+	const char *home = getenv("HOME");
+	int n;
+
+	if (xdg != NULL && *xdg != '\0')
+		n = snprintf(buf, buflen, "%s/emma/scripts", xdg);
+	else if (home != NULL && *home != '\0')
+		n = snprintf(buf, buflen, "%s/.config/emma/scripts", home);
+	else
+		return -1;
+	if (n < 0 || (size_t)n >= buflen)
+		return -1;
+	return 0;
+}
+
+/**
  * Loads openai_config_t from the TOML config file. base_url is mandatory;
  * api_key, model_name and temperature fall back to hardcoded defaults when
  * absent from the file. No environment variable contributes to the
  * configuration values themselves.
  *
+ * On success *scripts_dir receives the optional scripts_dir string value
+ * (NULL when absent), owned by the caller.
+ *
  * Returns 0 on success. On any failure -1 is returned, a diagnostic is
  * printed to stderr and all allocated strings are freed.
  */
-static int load_config(openai_config_t *config)
+static int load_config(openai_config_t *config, char **scripts_dir)
 {
 	char path[512];
 	char errbuf[256];
@@ -80,6 +106,7 @@ static int load_config(openai_config_t *config)
 	config->base_url = NULL;
 	config->model_name = NULL;
 	config->temperature = 0.7;
+	*scripts_dir = NULL;
 
 	if (config_path(path, sizeof path) != 0) {
 		fprintf(stderr, "emma: config path too long\n");
@@ -122,11 +149,22 @@ static int load_config(openai_config_t *config)
 	if (toml_get_double(doc, "temperature", &d) == 0)
 		config->temperature = d;
 
+	if (toml_get_string(doc, "scripts_dir", &s) == 0) {
+		*scripts_dir = xstrdup(s);
+		if (*scripts_dir == NULL) {
+			fprintf(stderr, "emma: out of memory\n");
+			goto out;
+		}
+	}
+
 	rc = 0;
 out:
 	toml_free(doc);
-	if (rc != 0)
+	if (rc != 0) {
 		config_free_strings(config);
+		free(*scripts_dir);
+		*scripts_dir = NULL;
+	}
 	return rc;
 }
 
@@ -136,7 +174,8 @@ int main(void) {
     }
 
     openai_config_t config;
-    if (load_config(&config) != 0) {
+    char *scripts_dir = NULL;
+    if (load_config(&config, &scripts_dir) != 0) {
         http_client_cleanup();
         return 1;
     }
@@ -160,9 +199,33 @@ int main(void) {
         fprintf(stderr, "emma: failed to initialize command registry\n");
         session_context_free(&context);
         config_free_strings(&config);
+        free(scripts_dir);
         http_client_cleanup();
         return 1;
     }
+
+    lua_bridge_t *bridge = NULL;
+    if (lua_bridge_init(&bridge, tui) != 0) {
+        fprintf(stderr, "emma: failed to initialize Lua scripting engine\n");
+        session_context_free(&context);
+        config_free_strings(&config);
+        free(scripts_dir);
+        http_client_cleanup();
+        commands_free();
+        return 1;
+    }
+
+    if (scripts_dir == NULL) {
+        char default_scripts[512];
+        if (scripts_dir_default(default_scripts, sizeof default_scripts) == 0)
+            scripts_dir = xstrdup(default_scripts);
+    }
+    if (scripts_dir == NULL ||
+        lua_bridge_load_scripts(bridge, scripts_dir) != 0) {
+        fprintf(stderr, "emma: failed to load Lua scripts\n");
+    }
+    free(scripts_dir);
+    scripts_dir = NULL;
 
     tui_render(tui);
 
@@ -182,6 +245,16 @@ int main(void) {
             continue;
         }
 
+        /* pre_message hook: fires when the user presses enter, before
+         * the message is stored or displayed; the returned text (if any)
+         * replaces the original everywhere. */
+        char *hooked = NULL;
+        if (lua_bridge_apply_hook(bridge, LUA_HOOK_PRE_MESSAGE, input,
+                                  &hooked) == 0 && hooked != NULL) {
+            free(input);
+            input = hooked;
+        }
+
         if (session_context_add_message(&context, "user", input) != 0) {
             free(input);
             break;
@@ -197,8 +270,19 @@ int main(void) {
         tui_set_status(tui, NULL);
 
         if (result == 0) {
-            tui_append_message(tui, "assistant", response.content);
-            session_context_add_message(&context, "assistant", response.content);
+            /* post_message hook: fires when the LLM completes its
+             * response, before display; the returned text (if any)
+             * replaces the original in the UI and in the history. */
+            char *final_text = NULL;
+            if (lua_bridge_apply_hook(bridge, LUA_HOOK_POST_MESSAGE,
+                                      response.content,
+                                      &final_text) != 0)
+                final_text = NULL;
+            const char *text = final_text != NULL ? final_text
+                                                  : response.content;
+            tui_append_message(tui, "assistant", text);
+            session_context_add_message(&context, "assistant", text);
+            free(final_text);
             openai_response_free(&response);
         } else {
             tui_append_message(tui, "assistant", "[Error: failed to get response]");
@@ -206,6 +290,7 @@ int main(void) {
     }
 
     tui_free(tui);
+    lua_bridge_free(bridge);
     session_context_free(&context);
     config_free_strings(&config);
     http_client_cleanup();
