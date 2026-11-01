@@ -8,7 +8,18 @@ INC_DIR="include"
 BINDIR=${BINDIR:-"./"}
 BUILDDIR=${BUILDDIR:-"build"}
 
-# Lua runtime: system liblua via pkg-config (5.4 preferred, 5.3 fallback)
+# All external dependencies resolved through pkg-config: libcurl, cJSON
+# and the Lua runtime (system liblua, 5.4 preferred, 5.3 fallback)
+for p in libcurl libcjson; do
+    if ! pkg-config --exists "$p"; then
+        echo "Error: pkg-config could not find '$p'. Install the corresponding development package." >&2
+        exit 1
+    fi
+done
+CURL_CFLAGS=$(pkg-config --cflags libcurl)
+CURL_LIBS=$(pkg-config --libs libcurl)
+CJSON_CFLAGS=$(pkg-config --cflags libcjson)
+CJSON_LIBS=$(pkg-config --libs libcjson)
 LUA_PKG=""
 for p in lua5.4 lua5.3 lua; do
     if pkg-config --exists "$p"; then LUA_PKG="$p"; break; fi
@@ -55,7 +66,7 @@ for src in "${SOURCES[@]}"; do
     
     # Compile source to object file in the build directory
     # Use -I "$INC_DIR" to include headers from include/
-    $CC $CFLAGS $LUA_CFLAGS -I "$INC_DIR" -c "$src" -o "$output_obj"
+    $CC $CFLAGS $CURL_CFLAGS $CJSON_CFLAGS $LUA_CFLAGS -I "$INC_DIR" -c "$src" -o "$output_obj"
     if [ $? -ne 0 ]; then
         echo "Error compiling $src"
         exit 1
@@ -65,7 +76,7 @@ done
 # --- Linking ---
 echo "Linking executable..."
 # Link all object files from the build directory into the final executable
-$CC ${OBJECT_FILES[@]} -o "$BINDIR"/emma-code -lcurl -lcjson $LUA_LIBS
+$CC ${OBJECT_FILES[@]} -o "$BINDIR"/emma-code $CURL_LIBS $CJSON_LIBS $LUA_LIBS
 if [ $? -ne 0 ]; then
     echo "Error linking executable"
     exit 1

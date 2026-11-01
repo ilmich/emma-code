@@ -5,18 +5,25 @@ A minimal agent tui for coding.
 ## Tech stack
 - Language: C (C99)
 - Build system: Make
+- Scripting: Lua 5.4 (system liblua via pkg-config, 5.3 fallback)
+
+## Dependencies
+- libcurl development package
+- cJSON development package
+- Lua development package (`liblua5.4-dev` on Debian/Ubuntu, `lua-devel` on Fedora)
 
 ## Package manager & commands
 - Build: `make` or `build.sh`
-- Test: `make test` (unit tests in `tests/test_*.c`, end-to-end in `tests/e2e.sh`; known bugs are `XFAIL`)
+- Test: `make test` (unit tests in `tests/test_*.c`, runner in `tests/run_tests.sh`; network tests use the local mock OpenAI server `tests/mock_server.py`, skipped if python3 is missing; known bugs are `XFAIL`)
 - Lint: not configured
 - Clean: `make clean`
 
 ## Repository structure
 - `/include` – Directory housing all public header files for the project.
 - `/src` – source files
-- `/tests` – test files (none yet)
-- `/doc` – documentation
+- `/tests` – test files (`test_*.c`, `test.h`, runner `run_tests.sh`, mock server `mock_server.py`, fixtures in `tests/fixtures/`)
+- `/doc` – documentation (`lua_api.md`, examples in `doc/examples/`)
+- `/.commits` – draft commit messages (not tracked by git)
 - `/build` – object files and binaries (ignored by git)
 - `Makefile` – make build script
 - `build.sh` – bash build script alternative to make
@@ -27,7 +34,11 @@ A minimal agent tui for coding.
 - `include/http_client.h`: Defines the C interface for performing HTTP requests using libcurl, supporting both standard and streaming responses.
 - `include/openai_client.h`: Defines the C interface for interacting with the OpenAI Chat Completion API, including message structures and response handling.
 - `include/session_context.h`: Defines the C interface for managing session context.
-- `Makefile`: Defines the build targets and compilation rules for the project.
+- `include/tui.h`: Defines the C interface for the terminal UI (message rendering, status line, input handling).
+- `include/toml.h`: Defines the C interface for the minimal dependency-free TOML parser used to load `config.toml`.
+- `include/commands.h`: Defines the C interface for the runtime slash-command registry and '/'-prefixed input dispatch.
+- `include/lua_scripting.h`: Defines the C interface for the Lua scripting bridge (user scripts registering commands, UI access, `pre_message`/`post_message` hooks); see `doc/lua_api.md`.
+- `Makefile`: Defines the build targets and compilation rules for the project (all external dependencies — libcurl, cJSON, liblua — resolved through pkg-config).
 
 ## Conventions
 
@@ -42,6 +53,10 @@ A minimal agent tui for coding.
 - Bounded string function safety: Always check the return value of `snprintf` (truncation if return `>= (int)sizeof(buffer)` or `< 0`) and never use the buffer if truncation occurred. Avoid `strncpy` and `strncat` — they do not guarantee NUL-termination and silently truncate; prefer `snprintf` or `memcpy` with an explicit length. After any bounded write, verify the buffer is properly NUL-terminated before use. On truncation or error, report to `stderr` and return an error code.
 - Unsigned integer underflow safety: Never subtract from a `size_t` (or any unsigned type) without first guarding that the value is greater than zero. In loop bounds, prefer index-from-1 patterns (e.g. `for (size_t i = 1; i < count; ++i) { arr[i-1] = arr[i]; }`) over `count - 1` upper bounds. Before any expression of the form `n - k` where the type is unsigned, assert or guard that `n >= k`; if the guard fails, skip the operation or return an error.
 - Portability: Never use `#define _POSIX_C_SOURCE`, `#define _DEFAULT_SOURCE`, `#define _GNU_SOURCE`, or any other feature-test macro. Code must compile clean under `cc -std=c99 -Wall -Wextra -pedantic` without any such defines. When a POSIX-only symbol (e.g. `kill`, `usleep`) is unavoidable, declare it explicitly with `extern` rather than enabling a feature-test macro.
+
+### Build Rules
+- All external dependencies (libcurl, cJSON, liblua, ...) must be resolved through `pkg-config` in both `Makefile` and `build.sh`: never hardcode `-l`/`-I` flags for system libraries.
+- When a dependency is missing or not found by `pkg-config`, the build must fail with an explicit error message suggesting the development package to install.
 
 ### Testing Rules
 - Every new `src/foo.c` must have a matching `tests/test_foo.c` unit test file, except `main.c`.

@@ -1,14 +1,23 @@
 CC := gcc
 
-# Lua runtime: system liblua via pkg-config (5.4 preferred, 5.3 fallback).
+# All external dependencies resolved through pkg-config: libcurl, cJSON
+# and the Lua runtime (system liblua, 5.4 preferred, 5.3 fallback).
+DEP_MISSING := $(shell for p in libcurl libcjson; do pkg-config --exists $$p 2>/dev/null || echo $$p; done)
+ifneq ($(DEP_MISSING),)
+$(error pkg-config could not find: $(DEP_MISSING) - install the corresponding development packages)
+endif
 LUA_PKG := $(shell for p in lua5.4 lua5.3 lua; do pkg-config --exists $$p && echo $$p && break; done)
 ifeq ($(LUA_PKG),)
 $(error Lua development files not found: install liblua5.4-dev (Debian/Ubuntu) or lua-devel (Fedora))
 endif
+CURL_CFLAGS := $(shell pkg-config --cflags libcurl)
+CURL_LIBS := $(shell pkg-config --libs libcurl)
+CJSON_CFLAGS := $(shell pkg-config --cflags libcjson)
+CJSON_LIBS := $(shell pkg-config --libs libcjson)
 LUA_CFLAGS := $(shell pkg-config --cflags $(LUA_PKG))
 LUA_LIBS := $(shell pkg-config --libs $(LUA_PKG))
 
-CFLAGS := -std=c99 -Wall -Wextra -O2 -Iinclude -fanalyzer $(LUA_CFLAGS)
+CFLAGS := -std=c99 -Wall -Wextra -O2 -Iinclude -fanalyzer $(CURL_CFLAGS) $(CJSON_CFLAGS) $(LUA_CFLAGS)
 SRCDIR := src
 BUILDDIR := build
 TARGET := emma-code
@@ -23,7 +32,7 @@ OBJECTS := $(SOURCES:$(SRCDIR)/%.c=$(BUILDDIR)/%.o)
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS)
-	$(CC) $(OBJECTS) -lcurl -lcjson $(LUA_LIBS) -o $@
+	$(CC) $(OBJECTS) $(CURL_LIBS) $(CJSON_LIBS) $(LUA_LIBS) -o $@
 
 $(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -67,10 +76,10 @@ $(TESTBIN)/test_session_context: $(TESTDIR)/test_session_context.c $(TESTDIR)/te
 	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_session_context.c $(BUILDDIR)/session_context.o -o $@
 
 $(TESTBIN)/test_openai_client: $(TESTDIR)/test_openai_client.c $(TESTDIR)/test.h $(BUILDDIR)/openai_client.o $(BUILDDIR)/http_client.o | $(TESTBIN)
-	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_openai_client.c $(BUILDDIR)/openai_client.o $(BUILDDIR)/http_client.o -lcurl -lcjson -o $@
+	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_openai_client.c $(BUILDDIR)/openai_client.o $(BUILDDIR)/http_client.o $(CURL_LIBS) $(CJSON_LIBS) -o $@
 
 $(TESTBIN)/test_http_client: $(TESTDIR)/test_http_client.c $(TESTDIR)/test.h $(BUILDDIR)/http_client.o | $(TESTBIN)
-	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_http_client.c $(BUILDDIR)/http_client.o -lcurl -o $@
+	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_http_client.c $(BUILDDIR)/http_client.o $(CURL_LIBS) -o $@
 
 $(TESTBIN)/test_toml: $(TESTDIR)/test_toml.c $(TESTDIR)/test.h $(BUILDDIR)/toml.o | $(TESTBIN)
 	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_toml.c $(BUILDDIR)/toml.o -o $@
