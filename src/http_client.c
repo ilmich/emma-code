@@ -13,6 +13,7 @@ struct mem_struct {
     char **headers;
     size_t headers_count;
     http_stream_callback_t callback;
+    void *user_data;
     size_t last_pos;
 };
 
@@ -110,7 +111,8 @@ static size_t write_callback(void *contents, size_t size, size_t nmemb, void *us
                     if (off < line_len && line_ptr[off] == ' ') {
                         off++;
                     }
-                    mem->callback(line_ptr + off, line_len - off);
+                    mem->callback(line_ptr + off, line_len - off,
+                                  mem->user_data);
                 }
 
                 line_ptr = (line_end < mem->data + msg_end)
@@ -196,6 +198,7 @@ int http_request(const struct http_request_t *req, struct http_response_t *resp)
     chunk.headers = NULL;
     chunk.headers_count = 0;
     chunk.callback = req->callback;
+    chunk.user_data = req->user_data;
     chunk.last_pos = 0;
     chunk.streaming = 0;
 

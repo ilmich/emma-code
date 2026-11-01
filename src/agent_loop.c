@@ -3,8 +3,9 @@
  * @brief Agentic chat turn: session update, chat completion, raw reply.
  *
  * Extracted from the inline loop in main.c. Handles exactly one user
- * message per call; command dispatch and the Lua pre_message/post_message
- * hooks deliberately remain in main.c.
+ * message per call; command dispatch, the Lua pre_message/post_message
+ * hooks and every TUI interaction deliberately remain in main.c. This
+ * module is a pure session + API engine and does not include tui.h.
  */
 
 #include "agent_loop.h"
@@ -43,23 +44,26 @@ agent_msg_result_t agent_loop_handle_message(agent_loop_t *loop, char *input,
 		return AGENT_MSG_EXIT;
 	}
 
-	tui_append_message(loop->tui, "user", input);
-	free(input);
-	input = NULL;
-
-	tui_set_status(loop->tui, "Thinking...");
-
 	openai_response_t response = {0};
-	int result = openai_chat_completion(loop->config,
-					    loop->session->messages,
-					    loop->session->count, &response);
+	int result;
 
-	tui_set_status(loop->tui, NULL);
+	if (loop->config->stream) {
+		result = openai_chat_completion_stream(loop->config,
+						       loop->session->messages,
+						       loop->session->count,
+						       loop->on_delta,
+						       loop->delta_user_data,
+						       &response);
+	} else {
+		result = openai_chat_completion(loop->config,
+						loop->session->messages,
+						loop->session->count, &response);
+	}
 
 	if (result != 0 || response.content == NULL) {
-		tui_append_message(loop->tui, "assistant",
-				   "[Error: failed to get response]");
 		openai_response_free(&response);
+		free(input);
+		input = NULL;
 		return AGENT_MSG_ERROR;
 	}
 
@@ -69,13 +73,15 @@ agent_msg_result_t agent_loop_handle_message(agent_loop_t *loop, char *input,
 
 	if (copy == NULL) {
 		fprintf(stderr, "agent_loop: out of memory\n");
-		tui_append_message(loop->tui, "assistant",
-				   "[Error: failed to get response]");
 		openai_response_free(&response);
+		free(input);
+		input = NULL;
 		return AGENT_MSG_ERROR;
 	}
 	*reply = copy;
 
 	openai_response_free(&response);
+	free(input);
+	input = NULL;
 	return AGENT_MSG_OK;
 }

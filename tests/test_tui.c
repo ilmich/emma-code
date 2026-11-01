@@ -31,10 +31,12 @@ static void test_free_null_safe(void)
 
 static void test_api_null_args_safe(void)
 {
-	/* append_message/set_status reject NULL role/content/args. */
+	/* append_message/set_status/stream_append reject NULL args. */
 	tui_append_message(NULL, NULL, "content");
 	tui_append_message(NULL, "user", NULL);
 	tui_set_status(NULL, NULL);
+	tui_stream_append(NULL, NULL);
+	tui_stream_append(NULL, "delta");
 }
 
 static void test_init_fails_without_tty(void)

@@ -23,6 +23,10 @@ Scenarios are selected by the first path segment, e.g. a request to
                  "data: " events separated by CRLF (GET)
   ssespace     - 200 with Content-Type text/event-stream and two
                  "data:" events without a space after the colon (GET)
+  aistream     - 200 with Content-Type text/event-stream and an OpenAI
+                 chat-completion stream (POST; same auth/payload checks as
+                 "ok"): content deltas "Hello", " from", " mock!", one
+                 metadata-only chunk, one malformed chunk and [DONE]
 
 The server binds to an ephemeral port on 127.0.0.1 and prints the port
 number on stdout (flushed immediately) so the test runner can export it.
@@ -48,6 +52,26 @@ VALID_RESPONSE = {
 SSE_BODY = b"data: first\n\ndata: second\n\n"
 SSE_BODY_CRLF = b"data: first\r\n\r\ndata: second\r\n\r\n"
 SSE_BODY_NOSPACE = b"data:first\ndata:second\n\n"
+
+
+def _ai_chunk(content):
+    """One OpenAI-style streaming chunk with the given delta content."""
+    return json.dumps({"id": "chatcmpl-mock-stream", "object": "chat.completion.chunk",
+                       "choices": [{"index": 0, "delta": {"content": content},
+                                    "finish_reason": None}]}).encode()
+
+
+# OpenAI-style streaming reply: two content deltas, a metadata-only chunk
+# (usage, no delta), a malformed JSON chunk (must be ignored by clients) and
+# the [DONE] terminator. Together they spell "Hello from mock!".
+AI_STREAM_BODY = b"".join([
+    b"data: " + _ai_chunk("Hello") + b"\n\n",
+    b"data: " + _ai_chunk(" from") + b"\n\n",
+    b"data: {\"choices\": [], \"usage\": {\"total_tokens\": 12}}\n\n",
+    b"data: {not valid json}\n\n",
+    b"data: " + _ai_chunk(" mock!") + b"\n\n",
+    b"data: [DONE]\n\n",
+])
 
 
 def scenario_of(path):
@@ -108,6 +132,9 @@ class MockHandler(BaseHTTPRequestHandler):
 
         if scenario == "ok":
             self._respond(200, json.dumps(VALID_RESPONSE).encode())
+
+        elif scenario == "aistream":
+            self._respond(200, AI_STREAM_BODY, "text/event-stream")
 
         elif scenario.startswith("temp"):
             # temp<value>: require the payload to carry that temperature.

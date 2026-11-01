@@ -108,6 +108,7 @@ static int load_config(openai_config_t *config, char **scripts_dir)
 	config->base_url = NULL;
 	config->model_name = NULL;
 	config->temperature = 0.7;
+	config->stream = 0;
 	*scripts_dir = NULL;
 
 	if (config_path(path, sizeof path) != 0) {
@@ -151,6 +152,11 @@ static int load_config(openai_config_t *config, char **scripts_dir)
 	if (toml_get_double(doc, "temperature", &d) == 0)
 		config->temperature = d;
 
+	/* Optional boolean: stream the completion via SSE. Defaults to 0
+	 * (non-streaming) when absent or not a boolean. */
+	if (toml_get_bool(doc, "stream", &config->stream) != 0)
+		config->stream = 0;
+
 	if (toml_get_string(doc, "scripts_dir", &s) == 0) {
 		*scripts_dir = xstrdup(s);
 		if (*scripts_dir == NULL) {
@@ -168,6 +174,24 @@ out:
 		*scripts_dir = NULL;
 	}
 	return rc;
+}
+
+/* Reset before every message: clears the status line on the first
+ * streamed delta so it does not linger over the live reply. */
+static int g_status_cleared;
+
+/** Forward each streamed delta to the TUI (streaming reply rendering). */
+static void on_delta(const char *text, void *user_data)
+{
+	tui_t *tui = user_data;
+
+	if (tui == NULL || text == NULL || *text == '\0')
+		return;
+	if (!g_status_cleared) {
+		g_status_cleared = 1;
+		tui_set_status(tui, NULL);
+	}
+	tui_stream_append(tui, text);
 }
 
 int main(void) {
@@ -229,11 +253,13 @@ int main(void) {
     free(scripts_dir);
     scripts_dir = NULL;
 
-    /* Agentic loop context: all pointers are borrowed by agent_loop. */
+    /* Agentic loop context: all pointers are borrowed by agent_loop.
+     * The TUI stays here: streamed deltas are forwarded by on_delta. */
     agent_loop_t loop = {0};
     loop.config = &config;
     loop.session = &context;
-    loop.tui = tui;
+    loop.on_delta = on_delta;
+    loop.delta_user_data = tui;
 
     tui_render(tui);
 
@@ -263,14 +289,24 @@ int main(void) {
             input = hooked;
         }
 
+        /* Show the user message (with any pre_message replacement) and
+         * turn on the status line; agent_loop performs no rendering. */
+        tui_append_message(tui, "user", input);
+        tui_set_status(tui, "Thinking...");
+        g_status_cleared = 0;
+
         /* Send the message and get the raw assistant reply; command
-         * dispatch and hooks stay here, out of agent_loop. */
+         * dispatch, hooks and all rendering stay here, out of agent_loop. */
         char *reply = NULL;
         agent_msg_result_t res = agent_loop_handle_message(&loop, input, &reply);
+        tui_set_status(tui, NULL);
         if (res == AGENT_MSG_EXIT)
             break;
-        if (res == AGENT_MSG_ERROR)
+        if (res == AGENT_MSG_ERROR) {
+            tui_append_message(tui, "assistant",
+                               "[Error: failed to get response]");
             continue;
+        }
 
         /* post_message hook: fires when the LLM completes its response,
          * before display; the returned text (if any) replaces the

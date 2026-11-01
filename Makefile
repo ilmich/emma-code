@@ -50,6 +50,10 @@ test: $(TESTBIN)/test_session_context $(TESTBIN)/test_openai_client \
 	$(TESTBIN)/test_lua_scripting $(TESTBIN)/test_tui $(TESTBIN)/test_agent_loop
 	$(TESTDIR)/run_tests.sh
 
+# End-to-end routing checks against the local mock OpenAI server.
+e2e: $(TESTBIN)/test_openai_client $(TESTBIN)/test_agent_loop
+	$(TESTDIR)/e2e.sh
+
 # Enforce the repo layout rules: every src/*.c (except main.c) must have a
 # matching include/*.h, and every src/*.c (except main.c) must have a
 # tests/test_*.c.
@@ -100,4 +104,4 @@ $(TESTBIN)/test_agent_loop: $(TESTDIR)/test_agent_loop.c $(TESTDIR)/test.h \
 		$(BUILDDIR)/agent_loop.o $(BUILDDIR)/openai_client.o $(BUILDDIR)/http_client.o \
 		$(BUILDDIR)/session_context.o $(BUILDDIR)/tui.o -o $@ $(CURL_LIBS) $(CJSON_LIBS)
 
-.PHONY: all clean test check
+.PHONY: all clean test e2e check

@@ -4,8 +4,8 @@
  *
  * Network tests run against a local mock OpenAI server (tests/mock_server.py)
  * started by tests/run_tests.sh, which exports TEST_MOCK_PORT (see
- * mock_server.py for the scenario list). The TUI is not needed: every
- * tui_*() function is NULL-safe, so tests pass a NULL tui pointer.
+ * mock_server.py for the scenario list). The module performs no rendering:
+ * it knows nothing about the TUI, so no tui_*() function is involved.
  *
  * Note: AGENT_MSG_EXIT is only reachable when session_context_add_message()
  * fails on allocation (OOM); a full session truncates instead of failing.
@@ -20,6 +20,31 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Delta collector for the streaming agent-loop test, passed through
+ * loop.delta_user_data. */
+static struct delta_collector {
+	char buf[256];
+	size_t len;
+	size_t count;
+} g_deltas;
+
+static void delta_collect(const char *text, void *user_data)
+{
+	struct delta_collector *col = user_data;
+	size_t n = strlen(text);
+
+	if (col->len + n < sizeof(col->buf)) {
+		memcpy(col->buf + col->len, text, n);
+		col->len += n;
+		col->buf[col->len] = '\0';
+		col->count++;
+	} else {
+		test__failures++; /* collector overflow: report as failure */
+		fprintf(stderr, "  FAIL %s:%d: delta collector overflow\n",
+			__FILE__, __LINE__);
+	}
+}
 
 /* Portable strdup replacement: strdup is POSIX and is not declared under
  * strict C99 (tests must not define feature-test macros). */
@@ -54,7 +79,7 @@ static int build_url(char *buf, size_t size, const char *scenario)
 	return 0;
 }
 
-/* Initializes a loop context over an empty session and a NULL (safe) TUI.
+/* Initializes a loop context over an empty session with no delta callback.
  * Returns 0 on success. */
 static int make_loop(agent_loop_t *loop, session_context_t *ctx,
 		     openai_config_t *cfg, const char *base_url)
@@ -63,12 +88,14 @@ static int make_loop(agent_loop_t *loop, session_context_t *ctx,
 	cfg->base_url = (char *)base_url;
 	cfg->model_name = (char *)"test-model";
 	cfg->temperature = 0.7;
+	cfg->stream = 0;
 
 	if (session_context_init(ctx, 10) != 0)
 		return -1;
 	loop->config = cfg;
 	loop->session = ctx;
-	loop->tui = NULL;
+	loop->on_delta = NULL;
+	loop->delta_user_data = NULL;
 	return 0;
 }
 
@@ -99,7 +126,8 @@ static void test_null_input(void)
 
 	loop.config = &cfg;
 	loop.session = &ctx;
-	loop.tui = NULL;
+	loop.on_delta = NULL;
+	loop.delta_user_data = NULL;
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, NULL,
 							       &reply),
 			  (long long)AGENT_MSG_ERROR);
@@ -121,7 +149,8 @@ static void test_null_reply_out(void)
 	}
 	loop.config = &cfg;
 	loop.session = &ctx;
-	loop.tui = NULL;
+	loop.on_delta = NULL;
+	loop.delta_user_data = NULL;
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
 							       NULL),
 			  (long long)AGENT_MSG_ERROR);
@@ -143,7 +172,8 @@ static void test_null_config(void)
 
 	loop.config = NULL;
 	loop.session = &ctx;
-	loop.tui = NULL;
+	loop.on_delta = NULL;
+	loop.delta_user_data = NULL;
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
 							       &reply),
 			  (long long)AGENT_MSG_ERROR);
@@ -183,6 +213,66 @@ static void test_full_turn_success(void)
 	session_context_free(&ctx);
 }
 
+static void test_full_turn_streaming(void)
+{
+	char base[128];
+	session_context_t ctx;
+	openai_config_t cfg;
+	agent_loop_t loop;
+	char *reply = NULL;
+
+	if (build_url(base, sizeof(base), "aistream") != 0)
+		return;
+	if (make_loop(&loop, &ctx, &cfg, base) != 0)
+		return;
+	cfg.stream = 1;
+	loop.on_delta = delta_collect;
+	loop.delta_user_data = &g_deltas;
+
+	char *input = dup_str("Hello");
+	TEST_CHECK_NOT_NULL(input);
+	memset(&g_deltas, 0, sizeof(g_deltas));
+	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
+							       &reply),
+			  (long long)AGENT_MSG_OK);
+	/* The streamed deltas must arrive in order and the reply must hold
+	 * the full text, ready for the caller's post_message hook. */
+	TEST_CHECK_STR_EQ(reply, "Hello from mock!");
+	TEST_CHECK_STR_EQ(g_deltas.buf, "Hello from mock!");
+	TEST_CHECK_INT_EQ((long long)g_deltas.count, 3);
+	TEST_CHECK_INT_EQ((long long)ctx.count, 1);
+
+	free(reply);
+	session_context_free(&ctx);
+}
+
+static void test_full_turn_streaming_no_callback(void)
+{
+	char base[128];
+	session_context_t ctx;
+	openai_config_t cfg;
+	agent_loop_t loop;
+	char *reply = NULL;
+
+	if (build_url(base, sizeof(base), "aistream") != 0)
+		return;
+	if (make_loop(&loop, &ctx, &cfg, base) != 0)
+		return;
+	cfg.stream = 1;
+	/* on_delta stays NULL: the loop must still deliver the full reply. */
+
+	char *input = dup_str("Hello");
+	TEST_CHECK_NOT_NULL(input);
+	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
+							       &reply),
+			  (long long)AGENT_MSG_OK);
+	TEST_CHECK_STR_EQ(reply, "Hello from mock!");
+	TEST_CHECK_INT_EQ((long long)ctx.count, 1);
+
+	free(reply);
+	session_context_free(&ctx);
+}
+
 static void test_unreachable_server(void)
 {
 	session_context_t ctx;
@@ -217,6 +307,8 @@ int main(void)
 	TEST_RUN(test_null_reply_out);
 	TEST_RUN(test_null_config);
 	TEST_RUN(test_full_turn_success);
+	TEST_RUN(test_full_turn_streaming);
+	TEST_RUN(test_full_turn_streaming_no_callback);
 	TEST_RUN(test_unreachable_server);
 
 	http_client_cleanup();

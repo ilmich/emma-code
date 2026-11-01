@@ -14,19 +14,23 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Collector for streaming callbacks. The http_stream_callback_t signature
- * has no user-data parameter, so a file-scope struct is required. */
+/* Collector for streaming callbacks. The user_data parameter points to
+ * this struct, passed through http_request_t.user_data. */
 static struct sse_collector {
 	char buf[256];
 	size_t len;
 } g_collector;
 
-static void sse_collect(const char *buffer, size_t size)
+static void sse_collect(const char *buffer, size_t size, void *user_data)
 {
-	if (g_collector.len + size < sizeof(g_collector.buf)) {
-		memcpy(g_collector.buf + g_collector.len, buffer, size);
-		g_collector.len += size;
-		g_collector.buf[g_collector.len] = '\0';
+	struct sse_collector *col = user_data;
+
+	if (col == NULL)
+		col = &g_collector; /* legacy: file-scope fallback */
+	if (col->len + size < sizeof(col->buf)) {
+		memcpy(col->buf + col->len, buffer, size);
+		col->len += size;
+		col->buf[col->len] = '\0';
 	} else {
 		test__failures++; /* collector overflow: report as failure */
 		fprintf(stderr, "  FAIL %s:%d: sse collector overflow\n",
@@ -131,6 +135,7 @@ static void test_http_stream_sse_crlf(void)
 	req.url = url;
 	req.method = (char *)"GET";
 	req.callback = sse_collect;
+	req.user_data = &g_collector;
 
 	memset(&g_collector, 0, sizeof(g_collector));
 
@@ -154,6 +159,7 @@ static void test_http_stream_sse_no_space(void)
 	req.url = url;
 	req.method = (char *)"GET";
 	req.callback = sse_collect;
+	req.user_data = &g_collector;
 
 	memset(&g_collector, 0, sizeof(g_collector));
 
@@ -191,7 +197,7 @@ static void test_http_stream_sse(void)
 	req.headers = NULL;
 	req.headers_count = 0;
 	req.callback = sse_collect;
-	req.user_data = NULL;
+	req.user_data = &g_collector;
 
 	memset(&g_collector, 0, sizeof(g_collector));
 

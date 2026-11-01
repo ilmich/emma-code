@@ -49,6 +49,7 @@ base_url = "https://api.openai.com/v1"  # mandatory
 api_key = "your_api_key_here"           # optional
 model = "gpt-4o-mini"                   # optional, default: gpt-3.5-turbo
 temperature = 0.7                       # optional, default: 0.7
+stream = false                          # optional, default: false; stream the reply via SSE
 scripts_dir = "~/.config/emma/scripts"  # optional, Lua scripts directory
 ```
 

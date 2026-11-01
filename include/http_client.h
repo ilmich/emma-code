@@ -81,10 +81,12 @@ extern "C" {
  * The implementation ensures that the 'data:' prefix of the Server-Sent Events (SSE)
  * event is stripped, and the callback receives only the raw payload.
  *
- * @param buffer Pointer to the received data chunk.
+ * @param buffer Pointer to the received data chunk (NOT NUL-terminated).
  * @param size The size of the data chunk in bytes.
+ * @param user_data The user_data pointer from the http_request_t structure.
  */
-typedef void (*http_stream_callback_t)(const char* buffer, size_t size);
+typedef void (*http_stream_callback_t)(const char* buffer, size_t size,
+                                       void* user_data);
 
 /**
  * @brief Structure defining the parameters for an HTTP request.

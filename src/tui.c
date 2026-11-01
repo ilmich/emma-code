@@ -615,6 +615,22 @@ void tui_free(tui_t *tui) {
     free(tui);
 }
 
+// Adjusts the scroll offset after the message history changes, then
+// repaints the screen.
+static void tui_after_history_change(tui_t *tui) {
+    int role_prefix   = 12;
+    int content_width = tui->term_cols - role_prefix;
+    if (content_width < 1) content_width = 1;
+    int history_rows  = compute_history_rows(tui);
+    int total         = total_rendered_lines(tui);
+    int overflow      = total - history_rows;
+    if (overflow > 0) {
+        tui->scroll_offset = overflow;
+    }
+
+    tui_render(tui);
+}
+
 void tui_append_message(tui_t *tui, const char *role, const char *content) {
     if (!tui || !role || !content) return;
 
@@ -642,17 +658,32 @@ void tui_append_message(tui_t *tui, const char *role, const char *content) {
     tui->messages[tui->msg_count].content = c;
     tui->msg_count++;
 
-    int role_prefix   = 12;
-    int content_width = tui->term_cols - role_prefix;
-    if (content_width < 1) content_width = 1;
-    int history_rows  = compute_history_rows(tui);
-    int total         = total_rendered_lines(tui);
-    int overflow      = total - history_rows;
-    if (overflow > 0) {
-        tui->scroll_offset = overflow;
+    tui_after_history_change(tui);
+}
+
+void tui_stream_append(tui_t *tui, const char *text) {
+    if (!tui || !text || !*text) return;
+
+    if (tui->msg_count > 0 && tui->messages[tui->msg_count - 1].role != NULL &&
+        strcmp(tui->messages[tui->msg_count - 1].role, "assistant") == 0) {
+        // Extend the in-progress assistant message with the delta.
+        tui_message_t *m = &tui->messages[tui->msg_count - 1];
+        size_t clen = strlen(m->content);
+        size_t tlen = strlen(text);
+        char *tmp = realloc(m->content, clen + tlen + 1);
+        if (!tmp) {
+            fprintf(stderr, "tui_stream_append: realloc failed\n");
+            return;
+        }
+        m->content = tmp;
+        memcpy(m->content + clen, text, tlen + 1);
+    } else {
+        // No assistant message yet: the first delta starts one.
+        tui_append_message(tui, "assistant", text);
+        return; // tui_append_message already rendered
     }
 
-    tui_render(tui);
+    tui_after_history_change(tui);
 }
 
 void tui_set_status(tui_t *tui, const char *status) {
