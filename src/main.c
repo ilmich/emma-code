@@ -316,7 +316,9 @@ int main(void) {
                                   &final_text) != 0)
             final_text = NULL;
         const char *text = final_text != NULL ? final_text : reply;
-        tui_append_message(tui, "assistant", text);
+        /* Replace the streamed assistant message with the final reply
+         * instead of appending a second copy of the same message. */
+        tui_replace_assistant_message(tui, text);
         if (session_context_add_message(&context, "assistant", text) != 0)
             tui_append_message(tui, "system",
                                "[Warning: failed to store assistant "

@@ -686,6 +686,29 @@ void tui_stream_append(tui_t *tui, const char *text) {
     tui_after_history_change(tui);
 }
 
+void tui_replace_assistant_message(tui_t *tui, const char *content) {
+    if (!tui || !content) return;
+
+    if (tui->msg_count > 0 && tui->messages[tui->msg_count - 1].role != NULL &&
+        strcmp(tui->messages[tui->msg_count - 1].role, "assistant") == 0) {
+        // Commit the final reply into the message the streamed deltas
+        // have already created, so the text is not shown twice.
+        tui_message_t *m = &tui->messages[tui->msg_count - 1];
+        char *c = strdup(content);
+        if (c == NULL) {
+            fprintf(stderr, "tui_replace_assistant_message: strdup failed\n");
+            return;
+        }
+        free(m->content);
+        m->content = c;
+        tui_after_history_change(tui);
+        return;
+    }
+
+    // No streamed assistant message in progress: append normally.
+    tui_append_message(tui, "assistant", content);
+}
+
 void tui_set_status(tui_t *tui, const char *status) {
     if (!tui) return;
     free(tui->status);

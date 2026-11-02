@@ -7,6 +7,15 @@ int   tui_init(tui_t **tui);
 void  tui_free(tui_t *tui);
 void  tui_append_message(tui_t *tui, const char *role, const char *content);
 /**
+ * @brief Commits the final reply text: replaces the content of the last
+ *        assistant message when one is in progress (built from streamed
+ *        deltas), otherwise appends a new assistant message.
+ *
+ * @param tui TUI instance (must not be NULL)
+ * @param content Final reply text (must not be NULL)
+ */
+void  tui_replace_assistant_message(tui_t *tui, const char *content);
+/**
  * @brief Appends a streamed text delta to the assistant message.
  *
  * If the last message in the history is an assistant message, the text is

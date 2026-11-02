@@ -37,6 +37,8 @@ static void test_api_null_args_safe(void)
 	tui_set_status(NULL, NULL);
 	tui_stream_append(NULL, NULL);
 	tui_stream_append(NULL, "delta");
+	tui_replace_assistant_message(NULL, NULL);
+	tui_replace_assistant_message(NULL, "content");
 }
 
 static void test_init_fails_without_tty(void)
