@@ -6,6 +6,7 @@
 
 #include "lua_scripting.h"
 #include "commands.h"
+#include "util.h"
 
 #include <dirent.h>
 #include <lua.h>
@@ -35,16 +36,6 @@ struct lua_bridge {
 	void *error_ud;            /**< opaque context owned by the registrant */
 	char last_error[LAST_ERROR_MAX]; /**< most recent error message */
 };
-
-static char *xstrdup(const char *s)
-{
-	size_t n = strlen(s) + 1;
-	char *d = malloc(n);
-
-	if (d != NULL)
-		memcpy(d, s, n);
-	return d;
-}
 
 /**
  * Records an error message (truncation-safe), invokes the registered
@@ -359,7 +350,7 @@ int lua_bridge_load_scripts(lua_bridge_t *bridge, const char *dir)
 			continue;
 		if (name[0] == '.')
 			continue;
-		copy = xstrdup(name);
+		copy = util_strdup(name);
 		if (copy == NULL) {
 			rc = -1;
 			break;
@@ -455,7 +446,7 @@ int lua_bridge_apply_hook(lua_bridge_t *bridge, const char *event,
 			const char *r = lua_tostring(L, -1);
 
 			if (strcmp(r, current) != 0) {
-				char *copy = xstrdup(r);
+				char *copy = util_strdup(r);
 
 				if (copy == NULL) {
 					lua_pop(L, 3);

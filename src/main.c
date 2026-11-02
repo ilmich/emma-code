@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "agent_loop.h"
+#include "util.h"
 #include "commands.h"
 #include "http_client.h"
 #include "lua_scripting.h"
@@ -18,16 +19,6 @@
 #include "tui.h"
 
 #define MAX_HISTORY 10
-
-static char *xstrdup(const char *s)
-{
-	size_t n = strlen(s) + 1;
-	char *d = malloc(n);
-
-	if (d != NULL)
-		memcpy(d, s, n);
-	return d;
-}
 
 static void config_free_strings(openai_config_t *config)
 {
@@ -125,14 +116,14 @@ static int load_config(openai_config_t *config, char **scripts_dir)
 		fprintf(stderr, "emma: missing base_url in %s\n", path);
 		goto out;
 	}
-	config->base_url = xstrdup(s);
+	config->base_url = util_strdup(s);
 	if (config->base_url == NULL) {
 		fprintf(stderr, "emma: out of memory\n");
 		goto out;
 	}
 
 	if (toml_get_string(doc, "api_key", &s) == 0) {
-		config->api_key = xstrdup(s);
+		config->api_key = util_strdup(s);
 		if (config->api_key == NULL) {
 			fprintf(stderr, "emma: out of memory\n");
 			goto out;
@@ -140,9 +131,9 @@ static int load_config(openai_config_t *config, char **scripts_dir)
 	}
 
 	if (toml_get_string(doc, "model", &s) == 0) {
-		config->model_name = xstrdup(s);
+		config->model_name = util_strdup(s);
 	} else {
-		config->model_name = xstrdup("gpt-3.5-turbo");
+		config->model_name = util_strdup("gpt-3.5-turbo");
 	}
 	if (config->model_name == NULL) {
 		fprintf(stderr, "emma: out of memory\n");
@@ -158,7 +149,7 @@ static int load_config(openai_config_t *config, char **scripts_dir)
 		config->stream = 0;
 
 	if (toml_get_string(doc, "scripts_dir", &s) == 0) {
-		*scripts_dir = xstrdup(s);
+		*scripts_dir = util_strdup(s);
 		if (*scripts_dir == NULL) {
 			fprintf(stderr, "emma: out of memory\n");
 			goto out;
@@ -244,7 +235,7 @@ int main(void) {
     if (scripts_dir == NULL) {
         char default_scripts[512];
         if (scripts_dir_default(default_scripts, sizeof default_scripts) == 0)
-            scripts_dir = xstrdup(default_scripts);
+            scripts_dir = util_strdup(default_scripts);
     }
     if (scripts_dir == NULL ||
         lua_bridge_load_scripts(bridge, scripts_dir) != 0) {

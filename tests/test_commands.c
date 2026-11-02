@@ -72,6 +72,23 @@ int main(void)
 		commands_register("greet", capture_handler, NULL, NULL) != 0,
 		1);
 
+	/* names that would not fit the dispatcher's namebuf are rejected */
+	{
+		char ok[CMD_NAME_MAX];
+		char toolong[CMD_NAME_MAX + 1];
+
+		memset(ok, 'a', sizeof ok - 1);
+		ok[sizeof ok - 1] = '\0';
+		TEST_CHECK_INT_EQ(commands_register(ok, capture_handler, NULL,
+					    NULL), 0);
+
+		memset(toolong, 'b', sizeof toolong - 1);
+		toolong[sizeof toolong - 1] = '\0';
+		TEST_CHECK(commands_register(toolong, capture_handler, NULL,
+					     NULL) != 0);
+	}
+
+
 	/* registered command: handler receives name and args */
 	TEST_CHECK_INT_EQ(commands_dispatch("/greet one   two", fb, sizeof fb),
 			  CMD_HANDLED);

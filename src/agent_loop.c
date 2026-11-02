@@ -9,21 +9,11 @@
  */
 
 #include "agent_loop.h"
+#include "util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-/** strdup wrapper returning NULL instead of crashing on OOM. */
-static char *xstrdup(const char *s)
-{
-	size_t n = strlen(s) + 1;
-	char *d = malloc(n);
-
-	if (d != NULL)
-		memcpy(d, s, n);
-	return d;
-}
 
 agent_msg_result_t agent_loop_handle_message(agent_loop_t *loop, char *input,
 					     char **reply)
@@ -69,7 +59,7 @@ agent_msg_result_t agent_loop_handle_message(agent_loop_t *loop, char *input,
 
 	/* The response buffer is owned here; hand out an owned copy so the
 	 * caller never touches openai_client internals. */
-	char *copy = xstrdup(response.content);
+	char *copy = util_strdup(response.content);
 
 	if (copy == NULL) {
 		fprintf(stderr, "agent_loop: out of memory\n");

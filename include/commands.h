@@ -1,6 +1,10 @@
 #ifndef COMMANDS_H
 #define COMMANDS_H
 
+/** Maximum command name length (excluding the NUL), shared by the
+ *  registry and the dispatcher. */
+#define CMD_NAME_MAX 64
+
 #include <stddef.h>
 
 /** Outcome of commands_dispatch(): what the caller should do next. */

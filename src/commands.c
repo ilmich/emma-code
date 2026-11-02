@@ -8,6 +8,7 @@
  */
 
 #include "commands.h"
+#include "util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,16 +26,6 @@ static cmd_entry_t *registry = NULL;
 static size_t registry_count = 0;
 static size_t registry_cap = 0;
 static int initialized = 0;
-
-static char *xstrdup(const char *s)
-{
-	size_t n = strlen(s) + 1;
-	char *d = malloc(n);
-
-	if (d != NULL)
-		memcpy(d, s, n);
-	return d;
-}
 
 /** Looks up a command by name; returns its entry or NULL. */
 static cmd_entry_t *find_command(const char *name, size_t len)
@@ -96,6 +87,10 @@ int commands_register(const char *name, cmd_handler_fn fn,
 		if (*c == ' ' || *c == '\t' || *c == '/')
 			return -1;
 	}
+	/* Names that would not fit the dispatcher's namebuf would register
+	 * fine yet never be dispatchable: reject them here instead. */
+	if (strlen(name) >= CMD_NAME_MAX)
+		return -1;
 	if (find_command(name, strlen(name)) != NULL)
 		return -1;
 
@@ -105,12 +100,12 @@ int commands_register(const char *name, cmd_handler_fn fn,
 		return -1;
 	registry = grown;
 
-	char *name_copy = xstrdup(name);
+	char *name_copy = util_strdup(name);
 	if (name_copy == NULL)
 		return -1;
 	char *help_copy = NULL;
 	if (help != NULL) {
-		help_copy = xstrdup(help);
+		help_copy = util_strdup(help);
 		if (help_copy == NULL) {
 			free(name_copy);
 			return -1;
@@ -145,7 +140,7 @@ cmd_result_t commands_dispatch(const char *input, char *feedback,
 		p++;
 	size_t name_len = (size_t)(p - name_start);
 
-	char namebuf[64];
+	char namebuf[CMD_NAME_MAX];
 	if (name_len == 0 || name_len >= sizeof namebuf)
 		return CMD_NOT_COMMAND;
 	memcpy(namebuf, name_start, name_len);

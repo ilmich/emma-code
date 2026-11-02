@@ -9,6 +9,7 @@
  */
 
 #include "toml.h"
+#include "util.h"
 
 #include <errno.h>
 #include <math.h>
@@ -61,16 +62,6 @@ struct parser {
 
 /* ------------------------------------------------------------------ */
 /* Small utilities                                                     */
-
-static char *xstrdup(const char *s)
-{
-	size_t n = strlen(s) + 1;
-	char *d = malloc(n);
-
-	if (d != NULL)
-		memcpy(d, s, n);
-	return d;
-}
 
 /**
  * Formats an error message into the caller buffer. vsnprintf always
@@ -277,7 +268,7 @@ static int t_insert(toml_table_t *t, const char *name, toml_value_t v)
 		return -1;
 	if (t->count == t->cap && t_grow(t) != 0)
 		return -1;
-	k = xstrdup(name);
+	k = util_strdup(name);
 	if (k == NULL)
 		return -1;
 	e = &t->entries[t->count++];
@@ -629,6 +620,16 @@ static int p_number(struct parser *ps, toml_value_t *out)
 	return 0;
 }
 
+/** Frees the item values of a partially built array, then the array. */
+static void array_discard(toml_value_t *items, size_t count)
+{
+	size_t i;
+
+	for (i = 0; i < count; i++)
+		t_free_value(&items[i]);
+	free(items);
+}
+
 static int p_array(struct parser *ps, toml_value_t *out, int depth)
 {
 	toml_value_t *items = NULL;
@@ -653,7 +654,7 @@ static int p_array(struct parser *ps, toml_value_t *out, int depth)
 			break;
 		}
 		if (ps->p >= ps->end) {
-			free(items);
+			array_discard(items, count);
 			p_err(ps, "unterminated array");
 			return -1;
 		}
@@ -662,7 +663,7 @@ static int p_array(struct parser *ps, toml_value_t *out, int depth)
 			break;
 		}
 		if (p_value(ps, &v, depth + 1) != 0) {
-			free(items);
+			array_discard(items, count);
 			return -1;
 		}
 		if (count == cap) {
@@ -672,7 +673,7 @@ static int p_array(struct parser *ps, toml_value_t *out, int depth)
 
 			if (ni == NULL) {
 				t_free_value(&v);
-				free(items);
+				array_discard(items, count);
 				p_err(ps, "out of memory");
 				return -1;
 			}
@@ -697,7 +698,7 @@ static int p_array(struct parser *ps, toml_value_t *out, int depth)
 			ps->p++;
 			break;
 		}
-		free(items);
+		array_discard(items, count);
 		p_err(ps, "expected ',' or ']' in array");
 		return -1;
 	}

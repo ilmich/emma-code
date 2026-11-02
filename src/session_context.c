@@ -74,7 +74,22 @@ int session_context_add_message(session_context_t *context, const char *role, co
         return -1;
     }
 
-    // 1. Check for Truncation (Context Limit)
+    // 1. Grow first: on allocation failure the session is left untouched.
+    //    The new message always needs room, truncation or not.
+    if (context->count + 1 >= context->capacity) {
+        size_t new_capacity = context->capacity * 2;
+        openai_message_t* new_messages = (openai_message_t*)realloc(context->messages, new_capacity * sizeof(openai_message_t));
+
+        if (new_messages == NULL) {
+            // Failed to reallocate, prevent memory leak by returning failure
+            return -1;
+        }
+
+        context->messages = new_messages;
+        context->capacity = new_capacity;
+    }
+
+    // 2. Check for Truncation (Context Limit)
     // Guard against unsigned underflow: only truncate when there is at least
     // one message to drop.
     if (context->count > 0 && context->count >= context->max_messages) {
@@ -98,20 +113,6 @@ int session_context_add_message(session_context_t *context, const char *role, co
             context->messages[i] = context->messages[i+1];
         }
         context->count--;
-    }
-
-    // 2. Check for Resizing (Capacity Limit)
-    if (context->count + 1 >= context->capacity) {
-        size_t new_capacity = context->capacity * 2;
-        openai_message_t* new_messages = (openai_message_t*)realloc(context->messages, new_capacity * sizeof(openai_message_t));
-
-        if (new_messages == NULL) {
-            // Failed to reallocate, prevent memory leak by returning failure
-            return -1;
-        }
-
-        context->messages = new_messages;
-        context->capacity = new_capacity;
     }
 
     // 3. Prepare and Add the New Message
