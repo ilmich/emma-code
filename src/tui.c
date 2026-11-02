@@ -18,6 +18,7 @@ extern int close(int fd);
 #include <sys/select.h>
 #include <signal.h>
 #include "tui.h"
+#include "markdown.h"
 
 #define INPUT_MAX_LINES    5
 #define INPUT_BUF_INIT     256
@@ -185,30 +186,13 @@ static void write_str(const char *s) {
     out_write(s, strlen(s));
 }
 
-static void write_char(char c) {
-    char ch[2];
-    ch[0] = c;
-    ch[1] = '\0';
-    out_write(ch, 1);
-}
-
+// Number of pre-wrapped markdown lines a message renders to. Empty or
+// NULL content still occupies one (label) row.
 static int count_lines_for_content(const char *content, int width) {
-    if (!content || width <= 0) return 1;
-    int lines = 1;
-    int col = 0;
-    for (const char *p = content; *p; p++) {
-        if (*p == '\n') {
-            lines++;
-            col = 0;
-        } else {
-            col++;
-            if (col >= width) {
-                lines++;
-                col = 0;
-            }
-        }
-    }
-    return lines;
+    size_t count = 0;
+    md_line_t *lines = md_render(content, width, &count);
+    md_lines_free(lines, count);
+    return (count > 0) ? (int)count : 1;
 }
 
 static int count_input_lines(tui_t *tui) {
@@ -304,9 +288,13 @@ static void render_history(tui_t *tui) {
             label = "  System";
         }
 
-        int line_in_msg = 0;
-        const char *p = content;
-        int col = 0;
+        // Render the message into pre-wrapped, styled markdown lines.
+        // An empty message still shows its label on one row.
+        size_t md_count = 0;
+        md_line_t *lines = md_render(content, content_width, &md_count);
+
+        int line_in_msg = lines_to_skip; // first visible markdown line
+        lines_to_skip = 0;               // consumed by this message
 
         cursor_move(screen_row, 1);
         write_str(ANSI_CLEAR_LINE);
@@ -318,26 +306,9 @@ static void render_history(tui_t *tui) {
         write_str(": ");
         write_str(ANSI_RESET);
 
-        while (*p && screen_row <= history_rows) {
-            if (line_in_msg < lines_to_skip) {
-                if (*p == '\n') {
-                    line_in_msg++;
-                    col = 0;
-                } else {
-                    col++;
-                    if (col >= content_width) {
-                        line_in_msg++;
-                        col = 0;
-                    }
-                }
-                p++;
-                continue;
-            }
-
-            if (*p == '\n') {
-                line_in_msg++;
-                col = 0;
-                p++;
+        for (size_t li = (size_t)line_in_msg;
+             li < md_count && screen_row <= history_rows; li++) {
+            if (li > (size_t)line_in_msg) {
                 // Erase stale characters from a previous frame on this row.
                 write_str(ANSI_CLEAR_LINE);
                 screen_row++;
@@ -345,32 +316,17 @@ static void render_history(tui_t *tui) {
                     cursor_move(screen_row, 1);
                     write_str(ANSI_CLEAR_LINE);
                 }
-                continue;
             }
-
-            write_char(*p);
-            col++;
-            p++;
-
-            if (col >= content_width) {
-                line_in_msg++;
-                col = 0;
-                // Erase stale characters from a previous frame on this row.
-                write_str(ANSI_CLEAR_LINE);
-                screen_row++;
-                if (screen_row <= history_rows) {
-                    cursor_move(screen_row, 1);
-                    write_str(ANSI_CLEAR_LINE);
-                }
+            if (lines[li].text) {
+                write_str(lines[li].text);
             }
         }
 
-        // The loop ends with the cursor right after the last written character
-        // (whether the message finished, wrapped, or hit the screen bottom).
         // Clear from here so leftovers from a previous frame are erased.
         write_str(ANSI_CLEAR_LINE);
 
         screen_row++;
+        md_lines_free(lines, md_count);
     }
 
     while (screen_row <= history_rows) {
