@@ -50,6 +50,29 @@ A minimal agent tui for coding.
 - Functions that should not be visible outside the compilation unit must be declared as static.
 - Error Handling: Check the return value of every call that can fail; free all previously allocated resources on failure and return an error code or report to `stderr`. For pointer-returning functions (`malloc`, `realloc`, `calloc`, `strdup`, `getenv`, `cJSON_Create*`, `cJSON_Print`, etc.), check for `NULL` immediately before use.
 - Ownership and double-free prevention: Every dynamically allocated resource has exactly one owner responsible for freeing it. Never free a resource you do not own, and never free the same pointer twice. When transferring ownership, set the original pointer to `NULL` immediately after the transfer. Callbacks and helper functions must not free buffers owned by their caller; on failure they should signal the error (e.g. return `0`/`NULL`/error code) and let the owning caller perform cleanup.
+- Error cleanup with `goto cleanup`: In any function that acquires two or more resources (memory, handles, files, contexts) and can fail after the first acquisition, do not duplicate cleanup code inline nor use early returns with partial frees: every error path must jump to a single trailing `cleanup:` label that releases all resources in reverse order of acquisition. The success path also falls through to `cleanup` (centralized return) so the cleanup logic is written exactly once. The label is always named `cleanup` (existing `fail`/`out` labels are tolerated only in code not yet rewritten). Resource variables are initialized to `NULL`/a sentinel at declaration, the free functions called in `cleanup` must tolerate `NULL`, and on ownership transfer the pointer is set to `NULL` before jumping (consistent with the ownership rule above). Functions with a single resource or no acquisitions may keep plain early returns; the pattern is mandatory only where cleanup logic would otherwise be duplicated. Canonical form:
+  ```c
+  int foo_bla(size_t n)
+  {
+      char *buf = NULL;
+      char *copy = NULL;
+      int rc = -1;
+
+      buf = malloc(n);
+      if (!buf)
+          goto cleanup;
+      copy = malloc(n);
+      if (!copy)
+          goto cleanup;
+      /* ... work with buf and copy ... */
+      rc = 0;
+
+cleanup:
+      free(copy);
+      free(buf);
+      return rc;
+  }
+  ```
 - Bounded string function safety: Always check the return value of `snprintf` (truncation if return `>= (int)sizeof(buffer)` or `< 0`) and never use the buffer if truncation occurred. Avoid `strncpy` and `strncat` — they do not guarantee NUL-termination and silently truncate; prefer `snprintf` or `memcpy` with an explicit length. After any bounded write, verify the buffer is properly NUL-terminated before use. On truncation or error, report to `stderr` and return an error code.
 - Unsigned integer underflow safety: Never subtract from a `size_t` (or any unsigned type) without first guarding that the value is greater than zero. In loop bounds, prefer index-from-1 patterns (e.g. `for (size_t i = 1; i < count; ++i) { arr[i-1] = arr[i]; }`) over `count - 1` upper bounds. Before any expression of the form `n - k` where the type is unsigned, assert or guard that `n >= k`; if the guard fails, skip the operation or return an error.
 - Portability: Never use `#define _POSIX_C_SOURCE`, `#define _DEFAULT_SOURCE`, `#define _GNU_SOURCE`, or any other feature-test macro. Code must compile clean under `cc -std=c99 -Wall -Wextra -pedantic` without any such defines. When a POSIX-only symbol (e.g. `kill`, `usleep`) is unavoidable, declare it explicitly with `extern` rather than enabling a feature-test macro.
