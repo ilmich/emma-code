@@ -1,12 +1,95 @@
 #include "cjson/cJSON.h"
 #include "openai_client.h"
 #include "http_client.h"
+#include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
 
 #include <string.h>
 
 #define OPENAI_API_URL "/v1/chat/completions"
+
+void openai_tool_calls_free(openai_tool_call_t *calls, size_t count)
+{
+    if (calls == NULL)
+        return;
+    for (size_t i = 0; i < count; ++i) {
+        free(calls[i].id);
+        free(calls[i].name);
+        free(calls[i].arguments);
+    }
+    free(calls);
+}
+
+void openai_message_free(openai_message_t *msg)
+{
+    if (msg == NULL)
+        return;
+    free(msg->role);
+    free(msg->content);
+    free(msg->tool_call_id);
+    openai_tool_calls_free(msg->tool_calls, msg->tool_call_count);
+    msg->role = NULL;
+    msg->content = NULL;
+    msg->tool_call_id = NULL;
+    msg->tool_calls = NULL;
+    msg->tool_call_count = 0;
+}
+
+/**
+ * @brief Parses a message-level "tool_calls" JSON array into a malloc'ed
+ *        openai_tool_call_t array.
+ *
+ * @param arr cJSON array (must be valid).
+ * @param out Receives the malloc'ed array (owned by the caller).
+ * @param count Receives the number of parsed entries.
+ * @return 0 on success, -1 on out of memory (out is left NULL).
+ */
+static int parse_tool_calls(const cJSON *arr, openai_tool_call_t **out,
+                            size_t *count)
+{
+    size_t n = 0;
+    openai_tool_call_t *calls = NULL;
+
+    *out = NULL;
+    *count = 0;
+    n = (size_t)cJSON_GetArraySize(arr);
+    if (n == 0)
+        return 0;
+    calls = (openai_tool_call_t *)calloc(n, sizeof(*calls));
+    if (calls == NULL)
+        return -1;
+    for (size_t i = 0; i < n; ++i) {
+        const cJSON *item = cJSON_GetArrayItem(arr, (int)i);
+        const cJSON *fn = cJSON_GetObjectItem(item, "function");
+        const cJSON *id = cJSON_GetObjectItem(item, "id");
+        const cJSON *name = cJSON_GetObjectItem(fn, "name");
+        const cJSON *args = cJSON_GetObjectItem(fn, "arguments");
+
+        if (cJSON_IsString(id)) {
+            calls[i].id = util_strdup(id->valuestring);
+            if (calls[i].id == NULL)
+                goto oom;
+        }
+        if (cJSON_IsString(name)) {
+            calls[i].name = util_strdup(name->valuestring);
+            if (calls[i].name == NULL)
+                goto oom;
+        }
+        if (cJSON_IsString(args)) {
+            calls[i].arguments = util_strdup(args->valuestring);
+            if (calls[i].arguments == NULL)
+                goto oom;
+        }
+    }
+    *out = calls;
+    *count = n;
+    return 0;
+
+oom:
+    openai_tool_calls_free(calls, n);
+    return -1;
+}
 
 /**
  * @brief Constructs the JSON request body for the chat completion API.
@@ -36,6 +119,19 @@ static char* build_json_payload(
         return NULL;
     }
 
+    // Announce the available tools when configured (pre-serialized JSON
+    // array produced by the tool registry).
+    if (config->tools_json != NULL && config->tools_json[0] != '\0') {
+        cJSON *tools = cJSON_Parse(config->tools_json);
+        if (tools == NULL || !cJSON_IsArray(tools) ||
+            cJSON_AddItemToObject(root, "tools", tools) == 0) {
+            if (tools != NULL && cJSON_GetObjectItem(root, "tools") == NULL)
+                cJSON_Delete(tools); // not attached: free it separately
+            cJSON_Delete(root);
+            return NULL;
+        }
+    }
+
     // Add model name
     if (cJSON_AddStringToObject(root, "model", config->model_name) == NULL) {
         cJSON_Delete(root);
@@ -56,7 +152,12 @@ static char* build_json_payload(
     }
 
     for (size_t i = 0; i < message_count; ++i) {
-        if (messages[i].role == NULL || messages[i].content == NULL) {
+        /* content is optional only for assistant messages that carry
+         * tool_calls; every other message requires it. */
+        int has_tool_calls = messages[i].tool_calls != NULL &&
+                             messages[i].tool_call_count > 0;
+        if (messages[i].role == NULL ||
+            (messages[i].content == NULL && !has_tool_calls)) {
             cJSON_Delete(messages_array);
             cJSON_Delete(root);
             return NULL;
@@ -67,8 +168,87 @@ static char* build_json_payload(
             cJSON_Delete(root);
             return NULL;
         }
-        if (cJSON_AddStringToObject(message_item, "role", messages[i].role) == NULL ||
-            cJSON_AddStringToObject(message_item, "content", messages[i].content) == NULL) {
+        if (strcmp(messages[i].role, "tool") == 0 &&
+            messages[i].tool_call_id != NULL) {
+            /* Tool result message: role, content and the id of the
+             * answered call. */
+            if (cJSON_AddStringToObject(message_item, "role",
+                                        messages[i].role) == NULL ||
+                cJSON_AddStringToObject(message_item, "content",
+                                        messages[i].content) == NULL ||
+                cJSON_AddStringToObject(message_item, "tool_call_id",
+                                        messages[i].tool_call_id) == NULL) {
+                cJSON_Delete(message_item);
+                cJSON_Delete(messages_array);
+                cJSON_Delete(root);
+                return NULL;
+            }
+        } else if (messages[i].tool_calls != NULL &&
+                   messages[i].tool_call_count > 0) {
+            /* Assistant message requesting tool executions: content is
+             * optional, the tool_calls array is mandatory. */
+            cJSON *calls_array = cJSON_CreateArray();
+            if (calls_array == NULL) {
+                cJSON_Delete(message_item);
+                cJSON_Delete(messages_array);
+                cJSON_Delete(root);
+                return NULL;
+            }
+            if (cJSON_AddStringToObject(message_item, "role",
+                                        messages[i].role) == NULL ||
+                (messages[i].content != NULL &&
+                 cJSON_AddStringToObject(message_item, "content",
+                                         messages[i].content) == NULL)) {
+                cJSON_Delete(calls_array);
+                cJSON_Delete(message_item);
+                cJSON_Delete(messages_array);
+                cJSON_Delete(root);
+                return NULL;
+            }
+            for (size_t j = 0; j < messages[i].tool_call_count; ++j) {
+                const openai_tool_call_t *tc = &messages[i].tool_calls[j];
+                cJSON *call = cJSON_CreateObject();
+                cJSON *fn = NULL;
+
+                if (call == NULL ||
+                    (fn = cJSON_CreateObject()) == NULL ||
+                    cJSON_AddStringToObject(call, "id",
+                                            tc->id != NULL ? tc->id : "") == NULL ||
+                    cJSON_AddStringToObject(call, "type", "function") == NULL ||
+                    cJSON_AddItemToObject(call, "function", fn) == 0 ||
+                    cJSON_AddStringToObject(fn, "name",
+                                            tc->name != NULL ? tc->name : "") == NULL ||
+                    cJSON_AddStringToObject(fn, "arguments",
+                                            tc->arguments != NULL
+                                                ? tc->arguments : "") == NULL) {
+                    cJSON_Delete(call); // tolerates NULL
+                    cJSON_Delete(calls_array);
+                    cJSON_Delete(message_item);
+                    cJSON_Delete(messages_array);
+                    cJSON_Delete(root);
+                    return NULL;
+                }
+                if (cJSON_AddItemToArray(calls_array, call) == 0) {
+                    cJSON_Delete(call);
+                    cJSON_Delete(calls_array);
+                    cJSON_Delete(message_item);
+                    cJSON_Delete(messages_array);
+                    cJSON_Delete(root);
+                    return NULL;
+                }
+            }
+            if (cJSON_AddItemToObject(message_item, "tool_calls",
+                                      calls_array) == 0) {
+                cJSON_Delete(calls_array); // not attached
+                cJSON_Delete(message_item);
+                cJSON_Delete(messages_array);
+                cJSON_Delete(root);
+                return NULL;
+            }
+        } else if (cJSON_AddStringToObject(message_item, "role",
+                                           messages[i].role) == NULL ||
+                   cJSON_AddStringToObject(message_item, "content",
+                                           messages[i].content) == NULL) {
             cJSON_Delete(message_item);
             cJSON_Delete(messages_array);
             cJSON_Delete(root);
@@ -138,28 +318,41 @@ static int parse_response(const char *body, openai_response_t *response) {
         return 1;
     }
 
-    // Navigate to content field
+    // Content is optional when the assistant requests tool executions.
     cJSON *content = cJSON_GetObjectItem(message, "content");
-    if (!cJSON_IsString(content)) {
+    if (cJSON_IsString(content) && content->valuestring != NULL) {
+        const char *content_str = cJSON_GetStringValue(content);
+        size_t length = strlen(content_str);
+
+        // Allocate memory for the content
+        char *content_copy = (char *)malloc(length + 1);
+        if (!content_copy) {
+            perror("Failed to allocate memory for response content");
+            cJSON_Delete(root);
+            return 1;
+        }
+
+        memcpy(content_copy, content_str, length + 1);
+        response->content = content_copy;
+    }
+
+    // Extract the requested tool calls, if any.
+    cJSON *tool_calls = cJSON_GetObjectItem(message, "tool_calls");
+    if (cJSON_IsArray(tool_calls) && cJSON_GetArraySize(tool_calls) > 0) {
+        if (parse_tool_calls(tool_calls, &response->tool_calls,
+                             &response->tool_call_count) != 0) {
+            fprintf(stderr, "Error: out of memory parsing tool calls.\n");
+            cJSON_Delete(root);
+            return 1;
+        }
+    }
+
+    // A message with neither content nor tool calls is unusable.
+    if (response->content == NULL && response->tool_call_count == 0) {
         fprintf(stderr, "Error: 'content' string missing in message.\n");
         cJSON_Delete(root);
         return 1;
     }
-
-    // Extract and copy the content string
-    const char *content_str = cJSON_GetStringValue(content);
-    size_t length = strlen(content_str);
-
-    // Allocate memory for the content
-    char *content_copy = (char *)malloc(length + 1);
-    if (!content_copy) {
-        perror("Failed to allocate memory for response content");
-        cJSON_Delete(root);
-        return 1;
-    }
-
-    memcpy(content_copy, content_str, length + 1);
-    response->content = content_copy;
 
     // Clean up
     cJSON_Delete(root);
@@ -173,11 +366,113 @@ struct stream_ctx {
     char *content;                       /**< accumulated full text (owned) */
     size_t len;                          /**< current length of content */
     size_t cap;                          /**< allocated capacity of content */
+    openai_tool_call_t *tool_calls;      /**< accumulated tool calls (owned) */
+    size_t tool_call_count;              /**< number of accumulated calls */
+    size_t tool_call_cap;                /**< allocated capacity of tool_calls */
     openai_delta_callback_t on_delta;    /**< per-delta callback (may be NULL) */
     void *user_data;                     /**< opaque pointer for on_delta */
     int got_event;                       /**< set once at least one SSE event arrived */
     int oom;                             /**< set on allocation failure */
 };
+
+/**
+ * @brief Returns the accumulator slot for a streamed tool call index,
+ *        growing the array as needed (indices arrive in order starting
+ *        from 0, but any gap is filled with empty entries).
+ *
+ * @return Pointer to the slot, or NULL on allocation failure (ctx->oom).
+ */
+static openai_tool_call_t *stream_tool_slot(struct stream_ctx *ctx,
+                                            size_t index)
+{
+    if (index >= ctx->tool_call_cap) {
+        size_t new_cap = ctx->tool_call_cap ? ctx->tool_call_cap : 4;
+        openai_tool_call_t *grown;
+
+        while (new_cap <= index)
+            new_cap *= 2;
+        grown = (openai_tool_call_t *)realloc(
+            ctx->tool_calls, new_cap * sizeof(*grown));
+        if (grown == NULL) {
+            fprintf(stderr, "Error: out of memory while accumulating "
+                    "streamed tool calls\n");
+            ctx->oom = 1;
+            return NULL;
+        }
+        /* New slots start empty; existing slots above the count (gaps)
+         * must be zeroed too. */
+        for (size_t i = ctx->tool_call_cap; i < new_cap; ++i) {
+            grown[i].id = NULL;
+            grown[i].name = NULL;
+            grown[i].arguments = NULL;
+        }
+        ctx->tool_calls = grown;
+        ctx->tool_call_cap = new_cap;
+    }
+    if (index >= ctx->tool_call_count)
+        ctx->tool_call_count = index + 1;
+    return &ctx->tool_calls[index];
+}
+
+/**
+ * @brief Appends a string to a slot field (id/name/arguments fragments
+ *        are concatenated into the same allocation).
+ *
+ * @return 0 on success, -1 on allocation failure.
+ */
+static int stream_tool_append(char **field, const char *text)
+{
+    size_t old_len = *field != NULL ? strlen(*field) : 0;
+    size_t text_len = strlen(text);
+    char *grown = (char *)realloc(*field, old_len + text_len + 1);
+
+    if (grown == NULL)
+        return -1;
+    memcpy(grown + old_len, text, text_len + 1);
+    *field = grown;
+    return 0;
+}
+
+/**
+ * @brief Accumulates one delta.tool_calls fragment into the context.
+ *
+ * @return 0 on success, -1 on allocation failure (ctx->oom is set).
+ */
+static int stream_accumulate_tool_call(struct stream_ctx *ctx,
+                                       const cJSON *fragment)
+{
+    const cJSON *index = cJSON_GetObjectItem(fragment, "index");
+    const cJSON *id = cJSON_GetObjectItem(fragment, "id");
+    const cJSON *fn = cJSON_GetObjectItem(fragment, "function");
+    const cJSON *name = cJSON_GetObjectItem(fn, "name");
+    const cJSON *args = cJSON_GetObjectItem(fn, "arguments");
+    openai_tool_call_t *slot;
+
+    if (!cJSON_IsNumber(index) || index->valuedouble < 0)
+        return 0; // malformed fragment: ignore
+    slot = stream_tool_slot(ctx, (size_t)index->valuedouble);
+    if (slot == NULL)
+        return -1;
+    if (cJSON_IsString(id) && id->valuestring != NULL &&
+        slot->id == NULL &&
+        stream_tool_append(&slot->id, id->valuestring) != 0) {
+        ctx->oom = 1;
+        return -1;
+    }
+    if (cJSON_IsString(name) && name->valuestring != NULL &&
+        slot->name == NULL &&
+        stream_tool_append(&slot->name, name->valuestring) != 0) {
+        ctx->oom = 1;
+        return -1;
+    }
+    if (cJSON_IsString(args) && args->valuestring != NULL &&
+        args->valuestring[0] != '\0' &&
+        stream_tool_append(&slot->arguments, args->valuestring) != 0) {
+        ctx->oom = 1;
+        return -1;
+    }
+    return 0;
+}
 
 /**
  * @brief Appends a delta to the accumulated stream content.
@@ -274,6 +569,20 @@ static void stream_event(const char *buffer, size_t size, void *user_data)
         if (stream_accumulate(ctx, text, strlen(text)) == 0 &&
             ctx->on_delta != NULL) {
             ctx->on_delta(text, ctx->user_data);
+        }
+    }
+
+    // Accumulate streamed tool call fragments (delta.tool_calls).
+    if (cJSON_IsObject(delta)) {
+        cJSON *frag = cJSON_GetObjectItem(delta, "tool_calls");
+
+        if (cJSON_IsArray(frag)) {
+            cJSON *item = NULL;
+            cJSON_ArrayForEach(item, frag) {
+                if (cJSON_IsObject(item) &&
+                    stream_accumulate_tool_call(ctx, item) != 0)
+                    break; // ctx->oom is set; stop accumulating
+            }
         }
     }
 
@@ -419,6 +728,13 @@ int openai_chat_completion_stream(
                     response->content[0] = '\0';
                 }
             }
+            // Transfer any accumulated tool calls to the response.
+            if (response->content != NULL && ctx.tool_calls != NULL) {
+                response->tool_calls = ctx.tool_calls;
+                response->tool_call_count = ctx.tool_call_count;
+                ctx.tool_calls = NULL; // ownership transferred
+                ctx.tool_call_count = 0;
+            }
         }
         status = (ctx.oom || response->content == NULL) ? 1 : 0;
     } else {
@@ -430,6 +746,7 @@ int openai_chat_completion_stream(
 cleanup:
     http_response_free(&resp);
     free(ctx.content);
+    openai_tool_calls_free(ctx.tool_calls, ctx.tool_call_count);
     return status;
 }
 
@@ -437,5 +754,11 @@ void openai_response_free(openai_response_t *response) {
     if (response && response->content) {
         free(response->content);
         response->content = NULL;
+    }
+    if (response && response->tool_calls) {
+        openai_tool_calls_free(response->tool_calls,
+                               response->tool_call_count);
+        response->tool_calls = NULL;
+        response->tool_call_count = 0;
     }
 }

@@ -17,6 +17,7 @@ graph TD
 
     subgraph core["Agent loop"]
         agent_loop[agent_loop]
+        tools[tools]
         session_context[session_context]
         openai_client[openai_client]
         http_client[http_client]
@@ -32,6 +33,7 @@ graph TD
     main --> agent_loop
     main --> commands
     main --> lua_scripting
+    main --> tools
     main --> tui
     main --> session_context
     main --> openai_client
@@ -39,6 +41,7 @@ graph TD
     main --> http_client
 
     lua_scripting --> commands
+    lua_scripting --> tools
     lua_scripting --> tui
 
     agent_loop --> openai_client
@@ -52,12 +55,13 @@ graph TD
 
 | Componente | Dipende da (interno) | Dipendenze esterne |
 |---|---|---|
-| `main.c` | agent_loop, commands, lua_scripting, tui, session_context, openai_client, toml, http_client | — |
+| `main.c` | agent_loop, commands, lua_scripting, tools, tui, session_context, openai_client, toml, http_client | — |
 | `agent_loop` | openai_client (tipi), session_context | — |
-| `lua_scripting` | commands (registro comandi), tui (per `emma.append_message`/`set_status`) | liblua |
+| `lua_scripting` | commands (registro comandi), tools (registro tool), tui (per `emma.append_message`/`set_status`) | liblua, libcjson |
 | `session_context` | openai_client (solo il tipo `openai_message_t`) | — |
 | `openai_client` | http_client | libcJSON, libcurl (indiretta) |
 | `http_client` | — | libcurl |
+| `tools` | — | libcjson |
 | `commands` | — | — |
 | `tui` | — | — |
 | `toml` | — | — |
@@ -73,8 +77,16 @@ graph TD
     poter registrare comandi nel registro e toccare la UI, quindi li
     referenzia direttamente.
 - **`agent_loop` è il "motore puro"**: dipende solo da tipi di
-  `openai_client` e `session_context`; non sa nulla di TUI, comandi o Lua.
-  È il confine che mantiene testabile e sostituibile il loop di chat.
+  `openai_client` e `session_context`; non sa nulla di TUI, comandi, tool
+  o Lua. L'esecuzione dei tool call richiesti dal modello passa dal
+  callback `on_tool_call` implementato in `main.c` (lookup nel registry,
+  eventuale conferma utente, esecuzione): il loop resta testabile e
+  sostituibile.
+- **`tools` è il registro dei tool**: built-in (`read_file`, `write_file`,
+  `list_dir`, `bash`) e tool Lua (`emma.register_tool`) vivono nello
+  stesso registry; la serializzazione per il payload OpenAI avviene in
+  `tools_build_json()` e viene passata a `openai_client` come stringa JSON
+  (nessuna dipendenza inversa).
 - **`main.c` possiede il ciclo TUI** (init del terminale, lettura input,
   rendering di messaggi/status/delta) ma **non ne contiene la logica**:
   chiama le funzioni di `tui.[ch]`. È `main` che registra la callback
@@ -95,5 +107,9 @@ input utente → main.c → tui (rendering)
                      → commands (se "/...")
                      → lua_scripting (hook pre_message/post_message)
                      → agent_loop → openai_client → http_client
-                                  ↘ session_context (storia)
+                     |            ↘ tool_calls? → on_tool_call (main.c)
+                     |                             → tools (registry,
+                     |                               conferma, handler)
+                     |            ↘ risultati tool → prossimo round
+                     ↘ session_context (storia)
 ```

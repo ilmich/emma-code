@@ -73,6 +73,7 @@ static volatile sig_atomic_t g_resize_pending = 0;
 static int g_resize_pipe[2] = { -1, -1 };
 
 static void out_flush(void); // defined below; used by the signal handler
+static int read_byte(unsigned char *b); // defined below; used by tui_confirm
 
 static void tui_get_term_size(tui_t *tui) {
     struct winsize ws;
@@ -683,6 +684,45 @@ void tui_set_status(tui_t *tui, const char *status) {
     render_separator(tui);
     render_input(tui);
     out_flush();
+}
+
+int tui_confirm(tui_t *tui, const char *prompt) {
+    if (!tui || !prompt) return 0;
+
+    char line[256];
+    int n = snprintf(line, sizeof(line), "\r\n%s [y/n] ", prompt);
+    if (n < 0 || (size_t)n >= sizeof(line)) {
+        write_str("\r\n[confirm prompt truncated] [y/n] ");
+    } else {
+        write_str(line);
+    }
+    out_flush();
+
+    while (1) {
+        unsigned char b;
+        if (read_byte(&b) != 0) {
+            write_str("n\r\n");
+            out_flush();
+            return 0; /* EOF/terminal gone: deny */
+        }
+        if (b == 'y' || b == 'Y') {
+            write_str("y\r\n");
+            out_flush();
+            return 1;
+        }
+        if (b == 'n' || b == 'N') {
+            write_str("n\r\n");
+            out_flush();
+            return 0;
+        }
+        if (b == 0x03) {
+            /* Ctrl-C: deny like every other escape path. */
+            write_str("n\r\n");
+            out_flush();
+            return 0;
+        }
+        /* Any other key: keep waiting. */
+    }
 }
 
 static int input_ensure_cap(tui_t *tui, size_t needed) {

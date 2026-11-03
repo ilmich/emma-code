@@ -11,6 +11,7 @@
 #include "test.h"
 #include "http_client.h"
 #include "openai_client.h"
+#include "util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +42,7 @@ static openai_config_t make_config(const char *base_url)
 {
 	openai_config_t cfg;
 
+	memset(&cfg, 0, sizeof(cfg));
 	cfg.api_key = (char *)"test-key-123";
 	cfg.base_url = (char *)base_url;
 	cfg.model_name = (char *)"test-model";
@@ -78,6 +80,7 @@ static openai_message_t make_user_message(void)
 {
 	openai_message_t msg;
 
+	memset(&msg, 0, sizeof(msg));
 	msg.role = (char *)"user";
 	msg.content = (char *)"Hello";
 	return msg;
@@ -87,8 +90,8 @@ static void test_chat_completion_success(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[2];
-	openai_response_t resp;
+	openai_message_t msgs[2] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "ok") != 0) {
 		return;
@@ -115,8 +118,8 @@ static void test_chat_completion_null_model_name(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "ok") != 0) {
 		return;
@@ -135,8 +138,8 @@ static void test_chat_completion_null_message_fields(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "ok") != 0) {
 		return;
@@ -154,8 +157,8 @@ static void test_chat_completion_unauthorized(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "noauth") != 0) {
 		return;
@@ -173,8 +176,8 @@ static void test_chat_completion_server_error_500(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "status500") != 0) {
 		return;
@@ -192,8 +195,8 @@ static void test_chat_completion_malformed_json_body(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "badjson") != 0) {
 		return;
@@ -211,8 +214,8 @@ static void test_chat_completion_empty_choices(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "emptychoices") != 0) {
 		return;
@@ -230,8 +233,8 @@ static void test_chat_completion_missing_content(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "nocontent") != 0) {
 		return;
@@ -249,8 +252,8 @@ static void test_chat_completion_temperature_sent(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "temp0.42") != 0) {
 		return;
@@ -272,8 +275,8 @@ static void test_chat_completion_no_api_key(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "noauthkey") != 0) {
 		return;
@@ -295,8 +298,8 @@ static void test_chat_completion_unexpected_api_key(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	/* Converse of test_chat_completion_no_api_key: proves the mock
 	 * really checks for the absence of the Authorization header. */
@@ -316,8 +319,8 @@ static void test_stream_success(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "aistream") != 0) {
 		return;
@@ -345,8 +348,8 @@ static void test_stream_no_callback(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "aistream") != 0) {
 		return;
@@ -367,8 +370,8 @@ static void test_stream_fallback_non_sse(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "ok") != 0) {
 		return;
@@ -394,8 +397,8 @@ static void test_stream_server_error_500(void)
 {
 	char base[128];
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	if (build_url(base, sizeof(base), "status500") != 0) {
 		return;
@@ -413,8 +416,8 @@ static void test_stream_server_error_500(void)
 static void test_stream_unreachable_server(void)
 {
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	/* Port 1 on localhost: connection refused, no timeout wait. */
 	cfg.api_key = (char *)"test-key-123";
@@ -433,8 +436,8 @@ static void test_stream_unreachable_server(void)
 static void test_chat_completion_unreachable_server(void)
 {
 	openai_config_t cfg;
-	openai_message_t msgs[1];
-	openai_response_t resp;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
 
 	/* Port 1 on localhost: connection refused, no timeout wait. */
 	cfg.api_key = (char *)"test-key-123";
@@ -447,6 +450,138 @@ static void test_chat_completion_unreachable_server(void)
 
 	TEST_CHECK_INT_EQ(openai_chat_completion(&cfg, msgs, 1, &resp), 1);
 	openai_response_free(&resp);
+}
+
+static void test_tool_calls_parsed_non_streaming(void)
+{
+	char base[128];
+	openai_config_t cfg;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
+
+	if (build_url(base, sizeof(base), "toolcall") != 0)
+		return;
+	cfg = make_config(base);
+	msgs[0] = make_user_message();
+
+	TEST_CHECK_INT_EQ(openai_chat_completion(&cfg, msgs, 1, &resp), 0);
+	TEST_CHECK_NULL(resp.content);
+	TEST_CHECK_INT_EQ((long long)resp.tool_call_count, 1);
+	TEST_CHECK_STR_EQ(resp.tool_calls[0].id, "call_mock_1");
+	TEST_CHECK_STR_EQ(resp.tool_calls[0].name, "read_file");
+	TEST_CHECK_STR_EQ(resp.tool_calls[0].arguments,
+			 "{\"path\": \"/tmp/emma-test.txt\"}");
+	openai_response_free(&resp);
+	TEST_CHECK_NULL(resp.tool_calls);
+}
+
+static void test_tool_calls_accumulated_streaming(void)
+{
+	char base[128];
+	openai_config_t cfg;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
+
+	if (build_url(base, sizeof(base), "ssetool") != 0)
+		return;
+	cfg = make_config(base);
+	cfg.stream = 1;
+	msgs[0] = make_user_message();
+
+	TEST_CHECK_INT_EQ(
+	    openai_chat_completion_stream(&cfg, msgs, 1, NULL, NULL, &resp),
+	    0);
+	TEST_CHECK_STR_EQ(resp.content, "");
+	TEST_CHECK_INT_EQ((long long)resp.tool_call_count, 1);
+	TEST_CHECK_STR_EQ(resp.tool_calls[0].id, "call_mock_9");
+	TEST_CHECK_STR_EQ(resp.tool_calls[0].name, "read_file");
+	/* The two argument fragments must be concatenated. */
+	TEST_CHECK_STR_EQ(resp.tool_calls[0].arguments,
+			 "{\"path\":\"/tmp/x\"}");
+	openai_response_free(&resp);
+}
+
+static void test_tools_json_sent(void)
+{
+	char base[128];
+	openai_config_t cfg;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
+
+	if (build_url(base, sizeof(base), "toolreq") != 0)
+		return;
+	cfg = make_config(base);
+	cfg.tools_json = (char *)"[{\"type\":\"function\"," 
+	    "\"function\":{\"name\":\"read_file\"}}]";
+	msgs[0] = make_user_message();
+
+	/* The mock answers 200 only when the payload carries a non-empty
+	 * "tools" array. */
+	TEST_CHECK_INT_EQ(openai_chat_completion(&cfg, msgs, 1, &resp), 0);
+	TEST_CHECK_STR_EQ(resp.content, "Hello from mock!");
+	openai_response_free(&resp);
+
+	/* Without tools_json the same scenario must fail (400). */
+	cfg.tools_json = NULL;
+	TEST_CHECK_INT_EQ(openai_chat_completion(&cfg, msgs, 1, &resp), 1);
+	openai_response_free(&resp);
+}
+
+static void test_tool_messages_serialized(void)
+{
+	char base[128];
+	openai_config_t cfg;
+	openai_message_t msgs[3] = {0};
+	openai_tool_call_t calls[1];
+	openai_response_t resp = {0};
+
+	if (build_url(base, sizeof(base), "toolround") != 0)
+		return;
+	cfg = make_config(base);
+
+	/* user -> assistant (tool call) -> tool result: the mock returns the
+	 * final text only when the tool result message round-trips. */
+	msgs[0].role = (char *)"user";
+	msgs[0].content = (char *)"read the file";
+	calls[0].id = (char *)"call_mock_1";
+	calls[0].name = (char *)"read_file";
+	calls[0].arguments = (char *)"{}";
+	msgs[1].role = (char *)"assistant";
+	msgs[1].content = NULL;
+	msgs[1].tool_calls = calls;
+	msgs[1].tool_call_count = 1;
+	msgs[2].role = (char *)"tool";
+	msgs[2].content = (char *)"file body";
+	msgs[2].tool_call_id = (char *)"call_mock_1";
+
+	TEST_CHECK_INT_EQ(openai_chat_completion(&cfg, msgs, 3, &resp), 0);
+	TEST_CHECK_STR_EQ(resp.content, "Hello from mock!");
+	openai_response_free(&resp);
+}
+
+static void test_message_free_null_safe(void)
+{
+	openai_message_t msg = {0};
+
+	openai_message_free(NULL); /* must not crash */
+	openai_message_free(&msg); /* all fields NULL: must not crash */
+
+	msg.role = util_strdup("assistant");
+	msg.content = util_strdup("text");
+	msg.tool_call_id = util_strdup("call_1");
+	msg.tool_calls = (openai_tool_call_t *)malloc(sizeof(*msg.tool_calls));
+	TEST_CHECK_NOT_NULL(msg.tool_calls);
+	msg.tool_calls[0].id = util_strdup("call_1");
+	msg.tool_calls[0].name = util_strdup("bash");
+	msg.tool_calls[0].arguments = util_strdup("{}");
+	msg.tool_call_count = 1;
+	openai_message_free(&msg);
+	TEST_CHECK_NULL(msg.role);
+	TEST_CHECK_NULL(msg.content);
+	TEST_CHECK_NULL(msg.tool_call_id);
+	TEST_CHECK_NULL(msg.tool_calls);
+	TEST_CHECK_INT_EQ((long long)msg.tool_call_count, 0);
+	openai_message_free(&msg); /* idempotent */
 }
 
 int main(void)
@@ -465,6 +600,11 @@ int main(void)
 	TEST_RUN(test_chat_completion_no_api_key);
 	TEST_RUN(test_chat_completion_unexpected_api_key);
 	TEST_RUN(test_chat_completion_unreachable_server);
+	TEST_RUN(test_tool_calls_parsed_non_streaming);
+	TEST_RUN(test_tool_calls_accumulated_streaming);
+	TEST_RUN(test_tools_json_sent);
+	TEST_RUN(test_tool_messages_serialized);
+	TEST_RUN(test_message_free_null_safe);
 
 	TEST_RUN(test_stream_success);
 	TEST_RUN(test_stream_no_callback);

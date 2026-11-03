@@ -17,6 +17,9 @@
 #include "openai_client.h"
 #include "session_context.h"
 
+/** Default cap on tool-call rounds per message (loop safety guard). */
+#define AGENT_LOOP_MAX_ROUNDS_DEFAULT 10
+
 /** Outcome of agent_loop_handle_message(): what the caller should do next. */
 typedef enum {
 	AGENT_MSG_OK,    /**< reply obtained; *reply is caller-owned (free()) */
@@ -24,6 +27,18 @@ typedef enum {
 			      owns all error/status rendering */
 	AGENT_MSG_EXIT   /**< fatal error (session full): caller must stop */
 } agent_msg_result_t;
+
+/**
+ * Signature of the tool dispatcher invoked for every tool call requested
+ * by the model. Implementations perform the lookup, any user approval and
+ * the execution, and write a text result into *result (malloc, owned by
+ * the caller of the dispatcher). The return value only signals malloc
+ * failure of *result (nonzero); execution failures are conveyed through
+ * the *result text, which is always handed back to the model.
+ */
+typedef int (*agent_tool_dispatch_fn)(const char *name,
+				      const char *arguments_json,
+				      char **result, void *user_data);
 
 /** Agentic loop context. All pointers are borrowed, never freed. */
 typedef struct agent_loop {
@@ -33,6 +48,13 @@ typedef struct agent_loop {
 					       (may be NULL; used only when
 					       config->stream is nonzero) */
 	void *delta_user_data;     /**< opaque pointer handed back to on_delta */
+	agent_tool_dispatch_fn on_tool_call; /**< optional tool dispatcher
+					      (may be NULL; when NULL,
+					      requested tool calls are not
+					      executed) */
+	void *tool_user_data;      /**< opaque pointer handed to on_tool_call */
+	int max_tool_rounds;       /**< cap on tool rounds per message
+				        (<= 0: AGENT_LOOP_MAX_ROUNDS_DEFAULT) */
 } agent_loop_t;
 
 /**

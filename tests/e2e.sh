@@ -53,6 +53,30 @@ if command -v curl >/dev/null 2>&1; then
     esac
 fi
 
+# 3. Tool-call round-trip: the toolround scenario must answer with a tool
+#    call first and with the final text after a role "tool" message.
+if command -v curl >/dev/null 2>&1; then
+    body=$(curl -s "http://127.0.0.1:${PORT}/toolround/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer test-key-123" \
+        -d '{"model":"test-model","messages":[{"role":"user","content":"Hi"}]}')
+    case "$body" in
+        *"tool_calls"*"read_file"*) : ;;
+        *) echo "FAIL e2e: toolround did not return a tool call first" >&2
+           status=1 ;;
+    esac
+
+    body=$(curl -s "http://127.0.0.1:${PORT}/toolround/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer test-key-123" \
+        -d '{"model":"test-model","messages":[{"role":"user","content":"Hi"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"data"}]}')
+    case "$body" in
+        *"Hello from mock!"*) : ;;
+        *) echo "FAIL e2e: toolround did not finish after the tool result" >&2
+           status=1 ;;
+    esac
+fi
+
 if [ "$status" -eq 0 ]; then
     echo "e2e: OK"
 fi

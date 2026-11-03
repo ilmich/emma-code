@@ -16,18 +16,28 @@
 #include "openai_client.h"
 #include "session_context.h"
 #include "toml.h"
+#include "tools.h"
 #include "tui.h"
 
-#define MAX_HISTORY 10
+#define DEFAULT_MAX_HISTORY 100
+#define DEFAULT_MAX_TOOL_ROUNDS 10
+
+/** Context handed to the tool dispatcher (all pointers borrowed). */
+typedef struct {
+	tool_registry_t *tools;
+	tui_t *tui;
+} tool_dispatch_ctx_t;
 
 static void config_free_strings(openai_config_t *config)
 {
 	free(config->api_key);
 	free(config->base_url);
 	free(config->model_name);
+	free(config->tools_json);
 	config->api_key = NULL;
 	config->base_url = NULL;
 	config->model_name = NULL;
+	config->tools_json = NULL;
 }
 
 /**
@@ -81,12 +91,15 @@ static int scripts_dir_default(char *buf, size_t buflen)
  * configuration values themselves.
  *
  * On success *scripts_dir receives the optional scripts_dir string value
- * (NULL when absent), owned by the caller.
+ * (NULL when absent), owned by the caller; *max_history and
+ * *max_tool_rounds receive the optional numeric limits (defaults when
+ * absent or invalid).
  *
  * Returns 0 on success. On any failure -1 is returned, a diagnostic is
  * printed to stderr and all allocated strings are freed.
  */
-static int load_config(openai_config_t *config, char **scripts_dir)
+static int load_config(openai_config_t *config, char **scripts_dir,
+		       size_t *max_history, int *max_tool_rounds)
 {
 	char path[512];
 	char errbuf[256];
@@ -100,7 +113,10 @@ static int load_config(openai_config_t *config, char **scripts_dir)
 	config->model_name = NULL;
 	config->temperature = 0.7;
 	config->stream = 0;
+	config->tools_json = NULL;
 	*scripts_dir = NULL;
+	*max_history = DEFAULT_MAX_HISTORY;
+	*max_tool_rounds = DEFAULT_MAX_TOOL_ROUNDS;
 
 	if (config_path(path, sizeof path) != 0) {
 		fprintf(stderr, "emma: config path too long\n");
@@ -143,6 +159,18 @@ static int load_config(openai_config_t *config, char **scripts_dir)
 	if (toml_get_double(doc, "temperature", &d) == 0)
 		config->temperature = d;
 
+	/* Optional limits for the agentic tool loop and the history size. */
+	{
+		long long rounds = 0;
+		long long hist = 0;
+
+		if (toml_get_int(doc, "max_tool_rounds", &rounds) == 0 &&
+		    rounds > 0)
+			*max_tool_rounds = (int)rounds;
+		if (toml_get_int(doc, "max_history", &hist) == 0 && hist > 0)
+			*max_history = (size_t)hist;
+	}
+
 	/* Optional boolean: stream the completion via SSE. Defaults to 0
 	 * (non-streaming) when absent or not a boolean. */
 	if (toml_get_bool(doc, "stream", &config->stream) != 0)
@@ -165,6 +193,92 @@ cleanup:
 		*scripts_dir = NULL;
 	}
 	return rc;
+}
+
+/**
+ * Builds a short single-line preview of the tool arguments for the TUI.
+ * Truncation-safe: the buffer is always NUL-terminated.
+ */
+static void tool_args_preview(char *buf, size_t buflen, const char *args)
+{
+	int n;
+
+	if (buflen == 0)
+		return;
+	if (args == NULL)
+		n = snprintf(buf, buflen, "(no arguments)");
+	else
+		n = snprintf(buf, buflen, "%s", args);
+	if (n < 0 || (size_t)n >= buflen)
+		snprintf(buf, buflen, "%.*s...", (int)(buflen - 4),
+			 args != NULL ? args : "");
+	/* Flatten newlines so the preview stays on one status line. */
+	for (char *p = buf; *p != '\0'; ++p) {
+		if (*p == '\n' || *p == '\r')
+			*p = ' ';
+	}
+}
+
+/**
+ * Tool dispatcher wired into the agent loop: looks the tool up in the
+ * registry, asks the user for confirmation when the tool is marked as
+ * requiring approval, executes it and hands the text result back to the
+ * model. Execution failures are never fatal: the error text is sent to
+ * the model as the tool result. Returns nonzero only on malloc failure.
+ */
+static int dispatch_tool(const char *name, const char *arguments_json,
+			 char **result, void *user_data)
+{
+	tool_dispatch_ctx_t *ctx = user_data;
+	const tool_def_t *def;
+	char preview[160];
+	char line[224];
+	int n;
+
+	if (result == NULL)
+		return 1;
+	*result = NULL;
+	if (ctx == NULL || ctx->tools == NULL || name == NULL) {
+		*result = util_strdup("[tool error: no tool registry]");
+		return *result == NULL;
+	}
+
+	def = tools_find(ctx->tools, name);
+	if (def == NULL) {
+		n = snprintf(line, sizeof line, "[tool error: unknown tool '%s']",
+			     name);
+		if (n < 0 || (size_t)n >= sizeof line)
+			*result = util_strdup("[tool error: unknown tool]");
+		else
+			*result = util_strdup(line);
+		return *result == NULL;
+	}
+
+	tool_args_preview(preview, sizeof preview, arguments_json);
+	n = snprintf(line, sizeof line, "[tool] %s: %s", name, preview);
+	if (n >= 0 && (size_t)n < sizeof line && ctx->tui != NULL)
+		tui_append_message(ctx->tui, "system", line);
+
+	if (def->requires_approval) {
+		char prompt[192];
+
+		n = snprintf(prompt, sizeof prompt, "Allow %s? (%s)", name,
+			     preview);
+		if (n < 0 || (size_t)n >= sizeof prompt)
+			n = snprintf(prompt, sizeof prompt, "Allow %s?", name);
+		if (tui_confirm(ctx->tui, prompt) == 0) {
+			*result = util_strdup("[tool] denied by user");
+			return *result == NULL;
+		}
+	}
+
+	if (ctx->tui != NULL)
+		tui_set_status(ctx->tui, NULL);
+	def->handler(def, arguments_json != NULL ? arguments_json : "",
+		     result);
+	if (*result == NULL)
+		*result = util_strdup("[tool error: out of memory]");
+	return *result == NULL;
 }
 
 /* Reset before every message: clears the status line on the first
@@ -191,6 +305,10 @@ int main(void) {
     session_context_t context = {0};
     tui_t *tui = NULL;
     lua_bridge_t *bridge = NULL;
+    tool_registry_t *tools = NULL;
+    tool_dispatch_ctx_t tool_ctx = {0};
+    size_t max_history = DEFAULT_MAX_HISTORY;
+    int max_tool_rounds = DEFAULT_MAX_TOOL_ROUNDS;
     int commands_ready = 0;
     int http_ready = 0;
     int status = 1;
@@ -200,10 +318,11 @@ int main(void) {
     }
     http_ready = 1;
 
-    if (load_config(&config, &scripts_dir) != 0)
+    if (load_config(&config, &scripts_dir, &max_history,
+                    &max_tool_rounds) != 0)
         goto cleanup;
 
-    if (session_context_init(&context, MAX_HISTORY) != 0)
+    if (session_context_init(&context, max_history) != 0)
         goto cleanup;
 
     if (tui_init(&tui) != 0)
@@ -215,10 +334,25 @@ int main(void) {
     }
     commands_ready = 1;
 
+    if (tools_registry_init(&tools) != 0) {
+        fprintf(stderr, "emma: failed to initialize tool registry\n");
+        goto cleanup;
+    }
+    if (tools_register_builtins(tools) != 0) {
+        fprintf(stderr, "emma: failed to register built-in tools\n");
+        goto cleanup;
+    }
+    config.tools_json = tools_build_json(tools);
+    if (config.tools_json == NULL) {
+        fprintf(stderr, "emma: failed to serialize tool definitions\n");
+        goto cleanup;
+    }
+
     if (lua_bridge_init(&bridge, tui) != 0) {
         fprintf(stderr, "emma: failed to initialize Lua scripting engine\n");
         goto cleanup;
     }
+    lua_bridge_set_tool_registry(bridge, tools);
 
     if (scripts_dir == NULL) {
         char default_scripts[512];
@@ -233,12 +367,18 @@ int main(void) {
     scripts_dir = NULL;
 
     /* Agentic loop context: all pointers are borrowed by agent_loop.
-     * The TUI stays here: streamed deltas are forwarded by on_delta. */
+     * The TUI stays here: streamed deltas are forwarded by on_delta and
+     * tool executions go through dispatch_tool. */
     agent_loop_t loop = {0};
     loop.config = &config;
     loop.session = &context;
     loop.on_delta = on_delta;
     loop.delta_user_data = tui;
+    loop.on_tool_call = dispatch_tool;
+    loop.tool_user_data = &tool_ctx;
+    loop.max_tool_rounds = max_tool_rounds;
+    tool_ctx.tools = tools;
+    tool_ctx.tui = tui;
 
     tui_render(tui);
 
@@ -314,6 +454,7 @@ cleanup:
         tui_free(tui);
     }
     lua_bridge_free(bridge);
+    tools_registry_free(tools);
     if (commands_ready) {
         commands_free();
     }

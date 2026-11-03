@@ -69,6 +69,45 @@ end)
 
 Registering a hook for any other event name raises an error.
 
+## Tools
+
+### `emma.register_tool(name, description, schema, handler, opts)`
+
+Registers a tool the model can call during a chat turn. Tools are
+announced to the LLM together with the built-in ones (`read_file`,
+`write_file`, `list_dir`, `bash`); when the model requests one, emma
+executes the handler and feeds the result back to the model in the same
+turn.
+
+- `name` — unique tool name (max 63 characters).
+- `description` — shown to the model; describe when to use the tool.
+- `schema` — JSON-schema-style table of the arguments, e.g.
+  `{ type = "object", properties = { path = { type = "string" } },
+  required = { "path" } }`.
+- `handler` — `function(args)` called with the parsed arguments table.
+  It must return the result as a **string** (returning `nil` yields an
+  empty result); raising an error reports the failure to the model as the
+  tool result without aborting the script.
+- `opts` — optional table; `{ requires_approval = true }` makes emma ask
+  the user for confirmation before every execution (like the built-in
+  `bash` tool).
+
+```lua
+emma.register_tool("word_count", "Count the words of a text",
+  { type = "object",
+    properties = { text = { type = "string" } },
+    required = { "text" } },
+  function(args)
+    local n = 0
+    for _ in args.text:gmatch("%S+") do n = n + 1 end
+    return tostring(n)
+  end)
+```
+
+Tool output is truncated to 64 KB before it is sent back to the model.
+A failing handler never aborts the chat turn: the error text becomes the
+tool result the model sees.
+
 ## Terminal UI
 
 ### `emma.append_message(role, content)`
@@ -92,7 +131,8 @@ end)
 ## Complete example
 
 See [`examples/hello.lua`](examples/hello.lua) for a commented script that
-combines commands, hooks and UI access.
+combines commands, hooks and UI access, and
+[`examples/tools.lua`](examples/tools.lua) for custom tool registration.
 
 ## Notes and limitations
 

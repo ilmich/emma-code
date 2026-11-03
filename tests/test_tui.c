@@ -39,6 +39,10 @@ static void test_api_null_args_safe(void)
 	tui_stream_append(NULL, "delta");
 	tui_replace_assistant_message(NULL, NULL);
 	tui_replace_assistant_message(NULL, "content");
+
+	/* tui_confirm denies on NULL arguments without crashing. */
+	TEST_CHECK_INT_EQ((long long)tui_confirm(NULL, "proceed?"), 0);
+	TEST_CHECK_INT_EQ((long long)tui_confirm(NULL, NULL), 0);
 }
 
 static void test_init_fails_without_tty(void)

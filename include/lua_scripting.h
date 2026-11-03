@@ -14,6 +14,7 @@
 
 #include <stddef.h>
 #include "tui.h"
+#include "tools.h"
 
 typedef struct lua_bridge lua_bridge_t;
 
@@ -22,6 +23,9 @@ typedef struct lua_bridge lua_bridge_t;
 
 /** Hook fired when the LLM completes its response (before display). */
 #define LUA_HOOK_POST_MESSAGE "post_message"
+
+/** Default requires_approval for Lua tools when opts omits the flag. */
+#define LUA_TOOL_DEFAULT_APPROVAL 0
 
 /**
  * Callback used to report script load/runtime errors to the embedding UI.
@@ -48,6 +52,16 @@ int lua_bridge_init(lua_bridge_t **bridge, tui_t *tui);
  */
 void lua_bridge_set_error_reporter(lua_bridge_t *bridge,
 				   lua_script_error_fn fn, void *userdata);
+
+/**
+ * Attaches the shared tool registry: emma.register_tool() registers Lua
+ * handlers into it. The registry is borrowed, must outlive the bridge and
+ * must be set before scripts are loaded for register_tool to work.
+ *
+ * @param bridge Bridge to attach to (may be NULL: no-op).
+ * @param reg    Tool registry (borrowed; may be NULL to disable).
+ */
+void lua_bridge_set_tool_registry(lua_bridge_t *bridge, tool_registry_t *reg);
 
 /**
  * Releases the bridge and its Lua state. Safe to call with NULL.

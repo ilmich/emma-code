@@ -19,6 +19,13 @@ static char* safe_strdup(const char* s) {
 }
 
 /**
+ * @brief Releases the fields of one stored message (deep free).
+ */
+static void message_clear(openai_message_t *msg) {
+    openai_message_free(msg);
+}
+
+/**
  * @brief Initializes a new session context.
  */
 int session_context_init(session_context_t *context, size_t max_messages) {
@@ -30,15 +37,9 @@ int session_context_init(session_context_t *context, size_t max_messages) {
     context->max_messages = max_messages;
 
     // Allocate initial memory for the message array
-    context->messages = (openai_message_t*)malloc(context->capacity * sizeof(openai_message_t));
+    context->messages = (openai_message_t*)calloc(context->capacity, sizeof(openai_message_t));
     if (context->messages == NULL) {
         return -1; // Allocation failure
-    }
-
-    // Initialize pointers and fields
-    for (size_t i = 0; i < context->capacity; ++i) {
-        context->messages[i].role = NULL;
-        context->messages[i].content = NULL;
     }
 
     return 0;
@@ -49,10 +50,9 @@ int session_context_init(session_context_t *context, size_t max_messages) {
  */
 void session_context_free(session_context_t *context) {
     if (context != NULL) {
-	    // Free content and role strings for every message
+	// Free content and role strings for every message
 	for (size_t i = 0; i < context->count; ++i) {
-		free(context->messages[i].role);
-		free(context->messages[i].content);
+	    message_clear(&context->messages[i]);
 	}
 
 	// Free the array itself
@@ -67,13 +67,13 @@ void session_context_free(session_context_t *context) {
 }
 
 /**
- * @brief Adds a new message to the session context. Handles dynamic resizing and truncation.
+ * @brief Makes room for one more message: grows the array when needed and
+ *        applies the truncation policy (drop the oldest non-system
+ *        message) when the hard limit is reached.
+ *
+ * @return 0 on success (room available), -1 on allocation failure.
  */
-int session_context_add_message(session_context_t *context, const char *role, const char *content) {
-    if (context == NULL || role == NULL || content == NULL) {
-        return -1;
-    }
-
+static int make_room(session_context_t *context) {
     // 1. Grow first: on allocation failure the session is left untouched.
     //    The new message always needs room, truncation or not.
     if (context->count + 1 >= context->capacity) {
@@ -105,8 +105,7 @@ int session_context_add_message(session_context_t *context, const char *role, co
             victim = 0; // All messages are system prompts: drop the oldest
         }
 
-	free(context->messages[victim].role);
-	free(context->messages[victim].content);
+	message_clear(&context->messages[victim]);
 
 	// Shift all messages after the victim left by one.
         for (size_t i = victim; i + 1 < context->count; ++i) {
@@ -115,20 +114,129 @@ int session_context_add_message(session_context_t *context, const char *role, co
         context->count--;
     }
 
+    return 0;
+}
+
+/**
+ * @brief Adds a new message to the session context. Handles dynamic resizing and truncation.
+ */
+int session_context_add_message(session_context_t *context, const char *role, const char *content) {
+    if (context == NULL || role == NULL || content == NULL) {
+        return -1;
+    }
+
+    if (make_room(context) != 0) {
+        return -1;
+    }
+
     // 3. Prepare and Add the New Message
     // We must duplicate the strings because the input pointers (role, content) might go out of scope
-    // before the context is destroyed.
+    // before the context is destroyed. The slot is zeroed first: growth by
+    // realloc does not initialize the new tool-related fields.
     openai_message_t* new_msg = &context->messages[context->count];
 
+    memset(new_msg, 0, sizeof(*new_msg));
     new_msg->role = safe_strdup(role);
     new_msg->content = safe_strdup(content);
 
     if (new_msg->role == NULL || new_msg->content == NULL) {
-        free(new_msg->role);
-        free(new_msg->content);
+        message_clear(new_msg);
         return -1;
     }
 
     context->count++;
     return 0;
+}
+
+/**
+ * @brief Adds a tool result message (role "tool") answering the tool call
+ *        identified by tool_call_id.
+ */
+int session_context_add_tool_result(session_context_t *context,
+                                    const char *tool_call_id,
+                                    const char *content) {
+    if (context == NULL || tool_call_id == NULL || content == NULL) {
+        return -1;
+    }
+
+    if (make_room(context) != 0) {
+        return -1;
+    }
+
+    openai_message_t* new_msg = &context->messages[context->count];
+
+    memset(new_msg, 0, sizeof(*new_msg));
+    new_msg->role = safe_strdup("tool");
+    new_msg->content = safe_strdup(content);
+    new_msg->tool_call_id = safe_strdup(tool_call_id);
+
+    if (new_msg->role == NULL || new_msg->content == NULL ||
+        new_msg->tool_call_id == NULL) {
+        message_clear(new_msg);
+        return -1;
+    }
+
+    context->count++;
+    return 0;
+}
+
+/**
+ * @brief Adds an assistant message that requests tool executions. The
+ *        tool_calls array is deep-copied; the caller keeps ownership of
+ *        its own copy.
+ */
+int session_context_add_assistant_tool_calls(session_context_t *context,
+                                             const char *content,
+                                             const openai_tool_call_t *tool_calls,
+                                             size_t tool_call_count) {
+    if (context == NULL || tool_calls == NULL || tool_call_count == 0 ||
+        (content == NULL && tool_call_count == 0)) {
+        return -1;
+    }
+
+    if (make_room(context) != 0) {
+        return -1;
+    }
+
+    openai_message_t* new_msg = &context->messages[context->count];
+
+    memset(new_msg, 0, sizeof(*new_msg));
+    new_msg->role = safe_strdup("assistant");
+    new_msg->content = safe_strdup(content != NULL ? content : "");
+    if (new_msg->role == NULL || new_msg->content == NULL) {
+        message_clear(new_msg);
+        return -1;
+    }
+
+    new_msg->tool_calls = (openai_tool_call_t*)calloc(tool_call_count,
+                                                      sizeof(openai_tool_call_t));
+    if (new_msg->tool_calls == NULL) {
+        message_clear(new_msg);
+        return -1;
+    }
+    for (size_t i = 0; i < tool_call_count; ++i) {
+        if (tool_calls[i].id != NULL) {
+            new_msg->tool_calls[i].id = safe_strdup(tool_calls[i].id);
+            if (new_msg->tool_calls[i].id == NULL)
+                goto oom;
+        }
+        if (tool_calls[i].name != NULL) {
+            new_msg->tool_calls[i].name = safe_strdup(tool_calls[i].name);
+            if (new_msg->tool_calls[i].name == NULL)
+                goto oom;
+        }
+        if (tool_calls[i].arguments != NULL) {
+            new_msg->tool_calls[i].arguments = safe_strdup(tool_calls[i].arguments);
+            if (new_msg->tool_calls[i].arguments == NULL)
+                goto oom;
+        }
+    }
+    new_msg->tool_call_count = tool_call_count;
+
+    context->count++;
+    return 0;
+
+oom:
+    message_clear(new_msg);
+    return -1;
 }

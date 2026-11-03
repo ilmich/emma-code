@@ -17,7 +17,23 @@ typedef struct {
     char* model_name;
     double temperature;
     int stream;     /**< nonzero: request a streamed (SSE) completion */
+    char* tools_json; /**< optional: serialized JSON array of tool
+                           definitions ({type:"function",function:{...}})
+                           announced to the model; owned by the caller,
+                           may be NULL */
 } openai_config_t;
+
+/**
+ * @brief A single tool call requested by the assistant.
+ *
+ * arguments is the raw JSON string produced by the model (may be ""
+ * when the function takes no parameters).
+ */
+typedef struct {
+    char* id;        ///< tool call id (e.g. "call_abc123")
+    char* name;      ///< function name
+    char* arguments; ///< function arguments as a JSON string
+} openai_tool_call_t;
 
 /**
  * @brief Callback invoked for each streamed delta of the assistant content.
@@ -33,25 +49,51 @@ typedef void (*openai_delta_callback_t)(const char* text, void* user_data);
 
 /**
  * @brief Structure representing a single message in the chat history.
+ *
+ * Plain messages use only role and content. Assistant messages that
+ * request tool executions carry a non-NULL tool_calls array (content may
+ * be NULL). Tool results use role "tool" with tool_call_id set to the id
+ * of the call being answered.
  */
 typedef struct {
-    char* role;    ///< "system", "user", or "assistant".
-    char* content; ///< The message content.
+    char* role;    ///< "system", "user", "assistant" or "tool".
+    char* content; ///< The message content (may be NULL for tool calls).
+    char* tool_call_id; ///< role "tool": id of the answered call (or NULL).
+    openai_tool_call_t* tool_calls; ///< assistant: requested calls (or NULL).
+    size_t tool_call_count;         ///< number of entries in tool_calls.
 } openai_message_t;
 
 /**
  * @brief Structure to hold the response from the chat completion API.
  */
 typedef struct {
-    char* content; ///< The text content of the assistant's response.
+    char* content; ///< The text content of the assistant's response (or NULL).
+    openai_tool_call_t* tool_calls; ///< requested tool calls (or NULL).
+    size_t tool_call_count;         ///< number of entries in tool_calls.
 } openai_response_t;
+
+/**
+ * @brief Frees an array of tool calls (tolerates NULL).
+ *
+ * @param calls Array to free (may be NULL).
+ * @param count Number of entries in the array.
+ */
+void openai_tool_calls_free(openai_tool_call_t *calls, size_t count);
+
+/**
+ * @brief Frees the dynamically allocated fields of a message (tolerates
+ *        NULL). Does not free the structure itself.
+ *
+ * @param msg Message whose fields are released.
+ */
+void openai_message_free(openai_message_t *msg);
 
 /**
  * @brief Performs a non-streaming chat completion request to OpenAI.
  *
  * @param config The configuration including API key and base URL.
  * @param messages Array of messages in the conversation.
- * @param message_count The number of messages in the array. 
+ * @param message_count The number of messages in the array.
  * @param response Pointer to the structure where the response content will be stored.
  * @return 0 on success, 1 on failure.
  */
@@ -68,6 +110,10 @@ int openai_chat_completion(
  * When the server answers with "text/event-stream", each
  * choices[0].delta.content chunk is forwarded to on_delta() as it arrives
  * and the full accumulated text is stored in response->content at the end.
+ * Streamed tool calls (delta.tool_calls fragments indexed by "index") are
+ * accumulated per index: id and function name are taken from the first
+ * fragment carrying them, argument fragments are concatenated, and the
+ * complete calls end up in response->tool_calls.
  * If the server ignores "stream": true and answers with a plain JSON
  * body, the response is parsed like the non-streaming path (on_delta is
  * never called).

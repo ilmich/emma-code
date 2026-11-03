@@ -8,6 +8,8 @@
 
 #include "lua_scripting.h"
 #include "commands.h"
+#include "tools.h"
+#include "util.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +22,7 @@ extern char *strdup(const char *s);
 #define FIX_CHAIN "tests/fixtures/scripts_chain"
 #define FIX_BAD   "tests/fixtures/scripts_bad"
 #define FIX_EMPTY "tests/fixtures/scripts_empty"
+#define FIX_TOOLS "tests/fixtures/scripts_tools"
 #define FIX_NONE  "tests/fixtures/no_such_dir"
 
 /** Resets the command registry and initializes it for a fresh scenario. */
@@ -258,6 +261,89 @@ static void test_full_flow_transforms(void)
 	commands_free();
 }
 
+static void test_register_tool_and_dispatch(void)
+{
+	lua_bridge_t *bridge = NULL;
+	tool_registry_t *reg = NULL;
+	const tool_def_t *def;
+	char *result = NULL;
+
+	reset_commands();
+	TEST_CHECK_INT_EQ(lua_bridge_init(&bridge, NULL), 0);
+	TEST_CHECK_INT_EQ(tools_registry_init(&reg), 0);
+	lua_bridge_set_tool_registry(bridge, reg);
+	TEST_CHECK_INT_EQ(lua_bridge_load_scripts(bridge, FIX_TOOLS), 0);
+	TEST_CHECK_STR_EQ(lua_bridge_last_error(bridge), "");
+
+	/* Three Lua tools registered into the shared registry. */
+	TEST_CHECK_INT_EQ((long long)tools_count(reg), 3);
+	def = tools_find(reg, "upper");
+	TEST_CHECK_NOT_NULL(def);
+	TEST_CHECK_STR_EQ(def->description, "Uppercase the given text");
+	TEST_CHECK(strstr(def->parameters, "\"type\":\"object\"") != NULL);
+	TEST_CHECK(strstr(def->parameters, "\"text\"") != NULL);
+	TEST_CHECK_INT_EQ((long long)def->requires_approval, 0);
+
+	/* Dispatch through the registry handler: JSON args -> Lua table. */
+	TEST_CHECK_INT_EQ((long long)def->handler(
+			      def, "{\"text\":\"abc\"}", &result),
+			  0);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK_STR_EQ(result, "ABC");
+	free(result);
+
+	/* Nil return becomes an empty result, not an error. */
+	TEST_CHECK_INT_EQ((long long)def->handler(def, "{\"text\":\"x\"}",
+						  &result),
+			  0);
+	TEST_CHECK_NOT_NULL(result);
+	free(result);
+
+	/* Malformed arguments: error text for the model, no crash. */
+	def = tools_find(reg, "upper");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, "not json", &result),
+			  -1);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK(strstr(result, "not valid JSON") != NULL);
+	free(result);
+
+	/* Lua runtime error: reported, result carries an error text. */
+	def = tools_find(reg, "boom");
+	TEST_CHECK_NOT_NULL(def);
+	TEST_CHECK_INT_EQ((long long)def->requires_approval, 0);
+	TEST_CHECK_INT_EQ((long long)def->handler(def, "{}", &result), -1);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK(strstr(result, "tool failed") != NULL);
+	free(result);
+	TEST_CHECK_STR_NE(lua_bridge_last_error(bridge), "");
+
+	/* opts.requires_approval is honored. */
+	def = tools_find(reg, "risky");
+	TEST_CHECK_NOT_NULL(def);
+	TEST_CHECK_INT_EQ((long long)def->requires_approval, 1);
+	TEST_CHECK_INT_EQ((long long)def->handler(def, "{}", &result), 0);
+	TEST_CHECK_STR_EQ(result, "risky done");
+	free(result);
+
+	tools_registry_free(reg);
+	lua_bridge_free(bridge);
+	commands_free();
+}
+
+static void test_register_tool_without_registry(void)
+{
+	lua_bridge_t *bridge = NULL;
+
+	reset_commands();
+	TEST_CHECK_INT_EQ(lua_bridge_init(&bridge, NULL), 0);
+	/* No lua_bridge_set_tool_registry(): registration must fail with a
+	 * reported Lua error and no crash. */
+	TEST_CHECK_INT_EQ(lua_bridge_load_scripts(bridge, FIX_TOOLS), 0);
+	TEST_CHECK_STR_NE(lua_bridge_last_error(bridge), "");
+	lua_bridge_free(bridge);
+	commands_free();
+}
+
 int main(void)
 {
 	TEST_RUN(test_init_and_free);
@@ -270,6 +356,8 @@ int main(void)
 	TEST_RUN(test_hook_chain_order);
 	TEST_RUN(test_hook_runtime_error_pass_through);
 	TEST_RUN(test_full_flow_transforms);
+	TEST_RUN(test_register_tool_and_dispatch);
+	TEST_RUN(test_register_tool_without_registry);
 	commands_free();
 
 	if (test__failures == 0)

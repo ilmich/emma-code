@@ -27,6 +27,24 @@ Scenarios are selected by the first path segment, e.g. a request to
                  chat-completion stream (POST; same auth/payload checks as
                  "ok"): content deltas "Hello", " from", " mock!", one
                  metadata-only chunk, one malformed chunk and [DONE]
+  toolcall     - 200 with a chat completion whose assistant message
+                 carries one tool call (read_file), content null (POST;
+                 same auth/payload checks as "ok")
+  ssetool      - 200 text/event-stream (POST): a streamed tool call built
+                 from three delta.tool_calls fragments (id/name, then two
+                 argument fragments) and [DONE]
+  toolround    - two-phase tool round-trip (POST): when the request body
+                 contains a role "tool" message the final text reply is
+                 returned, otherwise a toolcall-style response
+  toolloop     - always answers with a toolcall-style response (POST;
+                 same auth/payload checks as "ok"): never terminates the
+                 tool loop, used to test the round limit
+  toolreq      - 200 with the standard reply only when the request body
+                 carries a non-empty "tools" array (POST); 400 otherwise
+  ssetoolround - two-phase streaming tool round-trip (POST): when the
+                 request body contains a role "tool" message an
+                 aistream-style text stream is returned, otherwise an
+                 ssetool-style tool call stream
 
 The server binds to an ephemeral port on 127.0.0.1 and prints the port
 number on stdout (flushed immediately) so the test runner can export it.
@@ -72,6 +90,63 @@ AI_STREAM_BODY = b"".join([
     b"data: " + _ai_chunk(" mock!") + b"\n\n",
     b"data: [DONE]\n\n",
 ])
+
+# Non-streaming assistant reply requesting one tool call (content null).
+TOOLCALL_REQUEST = {"path": "/tmp/emma-test.txt"}
+TOOL_CALL_RESPONSE = {
+    "id": "chatcmpl-mock-tool",
+    "object": "chat.completion",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_mock_1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps(TOOLCALL_REQUEST),
+                        },
+                    }
+                ],
+            },
+            "finish_reason": "tool_calls",
+        }
+    ],
+}
+
+
+def _tool_chunk(delta):
+    """One OpenAI-style streaming chunk carrying the given delta."""
+    return json.dumps({"id": "chatcmpl-mock-toolstream",
+                       "object": "chat.completion.chunk",
+                       "choices": [{"index": 0, "delta": delta,
+                                    "finish_reason": None}]}).encode()
+
+
+# Streamed tool call: three fragments for one call (id+name, then two
+# argument fragments that must be concatenated by the client).
+TOOL_STREAM_BODY = b"".join([
+    b"data: " + _tool_chunk({"tool_calls": [
+        {"index": 0, "id": "call_mock_9", "type": "function",
+         "function": {"name": "read_file", "arguments": ""}}]}) + b"\n\n",
+    b"data: " + _tool_chunk({"tool_calls": [
+        {"index": 0, "function": {"arguments": "{\"path\":"}}]}) + b"\n\n",
+    b"data: " + _tool_chunk({"tool_calls": [
+        {"index": 0, "function": {"arguments": "\"/tmp/x\"}"}}]}) + b"\n\n",
+    b"data: [DONE]\n\n",
+])
+
+
+def _has_tool_result(payload):
+    """True when the request messages contain a role "tool" message."""
+    try:
+        return any(m.get("role") == "tool" for m in payload["messages"])
+    except (KeyError, TypeError, AttributeError):
+        return False
 
 
 def scenario_of(path):
@@ -135,6 +210,34 @@ class MockHandler(BaseHTTPRequestHandler):
 
         elif scenario == "aistream":
             self._respond(200, AI_STREAM_BODY, "text/event-stream")
+
+        elif scenario == "toolcall":
+            self._respond(200, json.dumps(TOOL_CALL_RESPONSE).encode())
+
+        elif scenario == "ssetool":
+            self._respond(200, TOOL_STREAM_BODY, "text/event-stream")
+
+        elif scenario == "toolreq":
+            tools = payload.get("tools")
+            if isinstance(tools, list) and len(tools) > 0:
+                self._respond(200, json.dumps(VALID_RESPONSE).encode())
+            else:
+                self._respond(400, b'{"error": "missing tools array"}')
+
+        elif scenario == "toolround":
+            if _has_tool_result(payload):
+                self._respond(200, json.dumps(VALID_RESPONSE).encode())
+            else:
+                self._respond(200, json.dumps(TOOL_CALL_RESPONSE).encode())
+
+        elif scenario == "toolloop":
+            self._respond(200, json.dumps(TOOL_CALL_RESPONSE).encode())
+
+        elif scenario == "ssetoolround":
+            if _has_tool_result(payload):
+                self._respond(200, AI_STREAM_BODY, "text/event-stream")
+            else:
+                self._respond(200, TOOL_STREAM_BODY, "text/event-stream")
 
         elif scenario.startswith("temp"):
             # temp<value>: require the payload to carry that temperature.

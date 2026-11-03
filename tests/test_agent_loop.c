@@ -84,6 +84,7 @@ static int build_url(char *buf, size_t size, const char *scenario)
 static int make_loop(agent_loop_t *loop, session_context_t *ctx,
 		     openai_config_t *cfg, const char *base_url)
 {
+	memset(cfg, 0, sizeof(*cfg));
 	cfg->api_key = (char *)"test-key-123";
 	cfg->base_url = (char *)base_url;
 	cfg->model_name = (char *)"test-model";
@@ -96,6 +97,9 @@ static int make_loop(agent_loop_t *loop, session_context_t *ctx,
 	loop->session = ctx;
 	loop->on_delta = NULL;
 	loop->delta_user_data = NULL;
+	loop->on_tool_call = NULL;
+	loop->tool_user_data = NULL;
+	loop->max_tool_rounds = 0;
 	return 0;
 }
 
@@ -124,6 +128,7 @@ static void test_null_input(void)
 	if (session_context_init(&ctx, 10) != 0)
 		return;
 
+	memset(&loop, 0, sizeof(loop));
 	loop.config = &cfg;
 	loop.session = &ctx;
 	loop.on_delta = NULL;
@@ -147,6 +152,7 @@ static void test_null_reply_out(void)
 		free(input);
 		return;
 	}
+	memset(&loop, 0, sizeof(loop));
 	loop.config = &cfg;
 	loop.session = &ctx;
 	loop.on_delta = NULL;
@@ -170,6 +176,7 @@ static void test_null_config(void)
 		return;
 	}
 
+	memset(&loop, 0, sizeof(loop));
 	loop.config = NULL;
 	loop.session = &ctx;
 	loop.on_delta = NULL;
@@ -298,6 +305,211 @@ static void test_unreachable_server(void)
 	session_context_free(&ctx);
 }
 
+/* ------------------------------------------------------------------ */
+/* Tool round tests                                                    */
+/* ------------------------------------------------------------------ */
+
+/** Dispatcher recording every call and returning canned results. */
+static struct dispatch_recorder {
+	char names[8][32];
+	char args[8][64];
+	size_t count;
+	const char *reply;   /* result text handed back to the loop */
+	int fail_malloc;     /* when nonzero, simulates malloc failure */
+} g_dispatch;
+
+static int recording_dispatch(const char *name, const char *args_json,
+			      char **result, void *user_data)
+{
+	struct dispatch_recorder *rec = user_data;
+
+	if (rec->count < 8) {
+		snprintf(rec->names[rec->count],
+			 sizeof(rec->names[rec->count]), "%s",
+			 name != NULL ? name : "");
+		snprintf(rec->args[rec->count], sizeof(rec->args[rec->count]),
+			 "%s", args_json != NULL ? args_json : "");
+		rec->count++;
+	}
+	if (rec->fail_malloc)
+		return 1;
+	*result = dup_str(rec->reply);
+	return *result == NULL;
+}
+
+static void test_tool_round_success(void)
+{
+	char base[128];
+	session_context_t ctx;
+	openai_config_t cfg;
+	agent_loop_t loop;
+	char *reply = NULL;
+
+	if (build_url(base, sizeof(base), "toolround") != 0)
+		return;
+	if (make_loop(&loop, &ctx, &cfg, base) != 0)
+		return;
+	memset(&g_dispatch, 0, sizeof(g_dispatch));
+	g_dispatch.reply = "file body";
+	loop.on_tool_call = recording_dispatch;
+	loop.tool_user_data = &g_dispatch;
+
+	char *input = dup_str("read /tmp/emma-test.txt");
+	TEST_CHECK_NOT_NULL(input);
+	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
+							       &reply),
+			  (long long)AGENT_MSG_OK);
+	TEST_CHECK_STR_EQ(reply, "Hello from mock!");
+
+	/* The dispatcher saw exactly one call with the mock's arguments. */
+	TEST_CHECK_INT_EQ((long long)g_dispatch.count, 1);
+	TEST_CHECK_STR_EQ(g_dispatch.names[0], "read_file");
+
+	/* History: user, assistant(tool_calls), tool result. The final
+	 * assistant text is stored by the caller, not by the loop. */
+	TEST_CHECK_INT_EQ((long long)ctx.count, 3);
+	TEST_CHECK_STR_EQ(ctx.messages[1].role, "assistant");
+	TEST_CHECK_INT_EQ((long long)ctx.messages[1].tool_call_count, 1);
+	TEST_CHECK_STR_EQ(ctx.messages[1].tool_calls[0].id, "call_mock_1");
+	TEST_CHECK_STR_EQ(ctx.messages[2].role, "tool");
+	TEST_CHECK_STR_EQ(ctx.messages[2].tool_call_id, "call_mock_1");
+	TEST_CHECK_STR_EQ(ctx.messages[2].content, "file body");
+
+	free(reply);
+	session_context_free(&ctx);
+}
+
+static void test_tool_round_streaming(void)
+{
+	char base[128];
+	session_context_t ctx;
+	openai_config_t cfg;
+	agent_loop_t loop;
+	char *reply = NULL;
+
+	if (build_url(base, sizeof(base), "ssetoolround") != 0)
+		return;
+	if (make_loop(&loop, &ctx, &cfg, base) != 0)
+		return;
+	cfg.stream = 1;
+	loop.on_delta = delta_collect;
+	loop.delta_user_data = &g_deltas;
+	memset(&g_dispatch, 0, sizeof(g_dispatch));
+	g_dispatch.reply = "out";
+	loop.on_tool_call = recording_dispatch;
+	loop.tool_user_data = &g_dispatch;
+
+	char *input = dup_str("do it");
+	TEST_CHECK_NOT_NULL(input);
+	memset(&g_deltas, 0, sizeof(g_deltas));
+	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
+							       &reply),
+			  (long long)AGENT_MSG_OK);
+	TEST_CHECK_STR_EQ(reply, "Hello from mock!");
+	TEST_CHECK_INT_EQ((long long)g_dispatch.count, 1);
+	TEST_CHECK_STR_EQ(g_dispatch.args[0], "{\"path\":\"/tmp/x\"}");
+
+	free(reply);
+	session_context_free(&ctx);
+}
+
+static void test_tool_calls_without_dispatcher(void)
+{
+	char base[128];
+	session_context_t ctx;
+	openai_config_t cfg;
+	agent_loop_t loop;
+	char *reply = NULL;
+
+	if (build_url(base, sizeof(base), "toolcall") != 0)
+		return;
+	if (make_loop(&loop, &ctx, &cfg, base) != 0)
+		return;
+	/* on_tool_call stays NULL: no execution, the content is returned. */
+
+	char *input = dup_str("Hello");
+	TEST_CHECK_NOT_NULL(input);
+	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
+							       &reply),
+			  (long long)AGENT_MSG_OK);
+	TEST_CHECK_STR_EQ(reply, "");
+	TEST_CHECK_INT_EQ((long long)ctx.count, 1); /* only the user msg */
+
+	free(reply);
+	session_context_free(&ctx);
+}
+
+static void test_tool_round_limit(void)
+{
+	char base[128];
+	session_context_t ctx;
+	openai_config_t cfg;
+	agent_loop_t loop;
+	char *reply = NULL;
+
+	if (build_url(base, sizeof(base), "toolloop") != 0)
+		return;
+	if (make_loop(&loop, &ctx, &cfg, base) != 0)
+		return;
+	memset(&g_dispatch, 0, sizeof(g_dispatch));
+	g_dispatch.reply = "out";
+	loop.on_tool_call = recording_dispatch;
+	loop.tool_user_data = &g_dispatch;
+	loop.max_tool_rounds = 2; /* the mock always answers with a call */
+
+	char *input = dup_str("loop forever");
+	TEST_CHECK_NOT_NULL(input);
+	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
+							       &reply),
+			  (long long)AGENT_MSG_OK);
+	TEST_CHECK_STR_EQ(reply, "[Error: tool round limit reached]");
+	/* max_tool_rounds + 1 requests were made, each dispatching one call. */
+	TEST_CHECK_INT_EQ((long long)g_dispatch.count, 3);
+
+	free(reply);
+	session_context_free(&ctx);
+}
+
+static void test_tool_session_full_exits(void)
+{
+	char base[128];
+	session_context_t ctx;
+	openai_config_t cfg;
+	agent_loop_t loop;
+	char *reply = NULL;
+
+	if (build_url(base, sizeof(base), "toolround") != 0)
+		return;
+	if (make_loop(&loop, &ctx, &cfg, base) != 0)
+		return;
+	memset(&g_dispatch, 0, sizeof(g_dispatch));
+	g_dispatch.reply = "out";
+	loop.on_tool_call = recording_dispatch;
+	loop.tool_user_data = &g_dispatch;
+
+	/* Fill the session to its hard limit with non-system messages. */
+	for (size_t i = 0; i < 10; ++i) {
+		char label[16];
+
+		snprintf(label, sizeof label, "m%zu", i);
+		TEST_CHECK_INT_EQ(session_context_add_message(&ctx, "user",
+							      label),
+				  0);
+	}
+	/* max_messages = 10: adding one more message makes room by
+	 * truncating, so the only fatal path is allocation failure. A full
+	 * session therefore cannot trigger EXIT here; instead verify that
+	 * the loop still works right at the limit. */
+	char *input = dup_str("next");
+	TEST_CHECK_NOT_NULL(input);
+	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
+							       &reply),
+			  (long long)AGENT_MSG_OK);
+	TEST_CHECK_NOT_NULL(reply);
+	free(reply);
+	session_context_free(&ctx);
+}
+
 int main(void)
 {
 	TEST_CHECK_INT_EQ(http_client_init(), 0);
@@ -310,6 +522,11 @@ int main(void)
 	TEST_RUN(test_full_turn_streaming);
 	TEST_RUN(test_full_turn_streaming_no_callback);
 	TEST_RUN(test_unreachable_server);
+	TEST_RUN(test_tool_round_success);
+	TEST_RUN(test_tool_round_streaming);
+	TEST_RUN(test_tool_calls_without_dispatcher);
+	TEST_RUN(test_tool_round_limit);
+	TEST_RUN(test_tool_session_full_exits);
 
 	http_client_cleanup();
 

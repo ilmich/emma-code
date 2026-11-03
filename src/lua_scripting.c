@@ -8,6 +8,8 @@
 #include "commands.h"
 #include "util.h"
 
+#include "cjson/cJSON.h"
+
 #include <dirent.h>
 #include <lua.h>
 #include <lauxlib.h>
@@ -31,6 +33,8 @@ struct lua_bridge {
 	lua_State *L;              /**< Lua state (owner of all Lua refs) */
 	int hooks_ref;             /**< registry ref: {event = {fn, ...}} */
 	int cmds_ref;              /**< registry ref: {name = handler_fn} */
+	int tools_ref;             /**< registry ref: {name = handler_fn} */
+	tool_registry_t *tools;    /**< borrowed tool registry (may be NULL) */
 	tui_t *tui;                /**< borrowed TUI for feedback (may be NULL) */
 	lua_script_error_fn error_fn; /**< optional error reporter */
 	void *error_ud;            /**< opaque context owned by the registrant */
@@ -144,6 +148,250 @@ static int l_register_command(lua_State *L)
 	return 0;
 }
 
+/**
+ * Converts a Lua value into a cJSON tree (for tool schemas and tool call
+ * arguments). Tables become objects, or arrays when they are a sequence
+ * (keys 1..n). Unsupported types (functions, threads, cycles) yield NULL.
+ *
+ * @param L Lua state.
+ * @param idx Stack index of the value to convert (absolute for recursion).
+ * @return New cJSON item owned by the caller, or NULL on unsupported
+ *         input or out of memory.
+ */
+static cJSON *json_from_lua(lua_State *L, int idx)
+{
+	int is_array = 1;
+	size_t seq_len = 0;
+	cJSON *item;
+
+	/* Normalize the index: recursion pushes on the stack and the
+	 * lua_next()/rawgeti calls below need a stable absolute index. */
+	idx = lua_absindex(L, idx);
+
+	switch (lua_type(L, idx)) {
+	case LUA_TSTRING:
+		return cJSON_CreateString(lua_tostring(L, idx));
+	case LUA_TNUMBER:
+		return cJSON_CreateNumber((double)lua_tonumber(L, idx));
+	case LUA_TBOOLEAN:
+		return cJSON_CreateBool(lua_toboolean(L, idx));
+	case LUA_TNIL:
+		return cJSON_CreateNull();
+	case LUA_TTABLE:
+		break;
+	default:
+		return NULL;
+	}
+
+	/* Array detection: a table is a sequence only when its first key is
+	 * the integer 1 (and rawlen matches); string keys or an empty table
+	 * make it an object. */
+	seq_len = lua_rawlen(L, idx);
+	lua_pushnil(L);
+	if (lua_next(L, idx) != 0) {
+		if (lua_tointeger(L, -2) != 1 || seq_len == 0)
+			is_array = 0;
+		lua_pop(L, 2); /* pop key and value */
+	} else {
+		is_array = 0; /* empty table: object */
+	}
+
+	item = is_array ? cJSON_CreateArray() : cJSON_CreateObject();
+	if (item == NULL)
+		return NULL;
+
+	if (is_array) {
+		for (size_t i = 1; i <= seq_len; i++) {
+			lua_rawgeti(L, idx, (lua_Integer)i);
+			cJSON *child = json_from_lua(L, -1);
+
+			lua_pop(L, 1);
+			if (child == NULL ||
+			    cJSON_AddItemToArray(item, child) == 0) {
+				cJSON_Delete(child);
+				cJSON_Delete(item);
+				return NULL;
+			}
+		}
+	} else {
+		lua_pushnil(L);
+		while (lua_next(L, idx) != 0) {
+			const char *key = lua_tostring(L, -2);
+			cJSON *child = NULL;
+			int ok;
+
+			if (key == NULL) {
+				lua_pop(L, 1); /* non-string key: skip value */
+				continue;
+			}
+			child = json_from_lua(L, -1);
+			ok = child != NULL &&
+			     cJSON_AddItemToObject(item, key, child) != 0;
+			lua_pop(L, 1); /* pop value, keep key for lua_next */
+			if (!ok) {
+				cJSON_Delete(child);
+				cJSON_Delete(item);
+				return NULL;
+			}
+		}
+	}
+	return item;
+}
+
+/**
+ * Pushes a cJSON tree onto the Lua stack as an equivalent value (objects
+ * and arrays become tables, null becomes nil).
+ */
+static void push_json_as_lua(lua_State *L, const cJSON *item)
+{
+	if (item == NULL || cJSON_IsNull(item)) {
+		lua_pushnil(L);
+	} else if (cJSON_IsString(item)) {
+		lua_pushstring(L, item->valuestring != NULL
+				      ? item->valuestring : "");
+	} else if (cJSON_IsNumber(item)) {
+		lua_pushnumber(L, (lua_Number)item->valuedouble);
+	} else if (cJSON_IsBool(item)) {
+		lua_pushboolean(L, cJSON_IsTrue(item));
+	} else if (cJSON_IsArray(item)) {
+		size_t i = 1;
+
+		lua_newtable(L);
+		const cJSON *child = NULL;
+		cJSON_ArrayForEach(child, item) {
+			push_json_as_lua(L, child);
+			lua_rawseti(L, -2, (lua_Integer)i++);
+		}
+	} else if (cJSON_IsObject(item)) {
+		lua_newtable(L);
+		const cJSON *child = NULL;
+		cJSON_ArrayForEach(child, item) {
+			if (child->string == NULL)
+				continue;
+			push_json_as_lua(L, child);
+			lua_setfield(L, -2, child->string);
+		}
+	} else {
+		lua_pushnil(L);
+	}
+}
+
+/**
+ * C handler installed in the tool registry for every Lua tool. Parses the
+ * model's JSON arguments into a Lua table and calls the registered Lua
+ * function; the returned string (or nil) becomes the tool result.
+ */
+static int lua_tool_handler(const tool_def_t *tool, const char *args_json,
+			    char **result)
+{
+	lua_bridge_t *bridge = tool != NULL ? tool->userdata : NULL;
+	lua_State *L;
+	cJSON *args = NULL;
+	const char *msg;
+	int rc = -1;
+
+	if (bridge == NULL || bridge->L == NULL || tool == NULL ||
+	    tool->name == NULL || result == NULL)
+		return -1;
+	*result = NULL;
+	L = bridge->L;
+
+	args = cJSON_Parse(args_json != NULL ? args_json : "");
+	if (args == NULL) {
+		*result = util_strdup("arguments are not valid JSON");
+		return *result != NULL ? -1 : -1;
+	}
+
+	lua_rawgeti(L, LUA_REGISTRYINDEX, bridge->tools_ref); /* tools */
+	lua_getfield(L, -1, tool->name);                      /* tools fn */
+	if (!lua_isfunction(L, -1)) {
+		lua_pop(L, 2);
+		cJSON_Delete(args);
+		*result = util_strdup("[lua] tool handler missing");
+		return -1;
+	}
+	push_json_as_lua(L, args);
+	cJSON_Delete(args);
+	args = NULL;
+	if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+		msg = lua_tostring(L, -1);
+		bridge_error(bridge, "lua error in tool '%s': %s", tool->name,
+			     msg != NULL ? msg : "unknown error");
+		lua_pop(L, 2); /* error message + tools table */
+		*result = util_strdup("[lua] tool failed (see message above)");
+		return -1;
+	}
+	if (lua_isstring(L, -1)) {
+		*result = util_strdup(lua_tostring(L, -1));
+		rc = 0;
+	} else if (lua_isnil(L, -1)) {
+		*result = util_strdup("");
+		rc = 0;
+	} else {
+		*result = util_strdup("[lua] tool returned a non-string value");
+		rc = -1;
+	}
+	lua_pop(L, 2); /* result + tools table */
+	if (*result == NULL)
+		return -1; /* out of memory */
+	return rc;
+}
+
+/**
+ * emma.register_tool(name, description, schema, handler, opts).
+ * opts is optional: { requires_approval = bool } (default false).
+ */
+static int l_register_tool(lua_State *L)
+{
+	lua_bridge_t *bridge = lua_touserdata(L, lua_upvalueindex(1));
+	const char *name = luaL_checkstring(L, 1);
+	const char *description = luaL_checkstring(L, 2);
+	cJSON *schema = NULL;
+	char *schema_json = NULL;
+	int requires_approval = LUA_TOOL_DEFAULT_APPROVAL;
+	int rc;
+
+	luaL_checktype(L, 3, LUA_TTABLE);
+	luaL_checktype(L, 4, LUA_TFUNCTION);
+	if (lua_istable(L, 5)) {
+		lua_getfield(L, 5, "requires_approval");
+		if (!lua_isnil(L, -1))
+			requires_approval = lua_toboolean(L, -1);
+		lua_pop(L, 1);
+	}
+
+	if (bridge->tools == NULL)
+		return luaL_error(L, "no tool registry attached");
+
+	schema = json_from_lua(L, 3);
+	if (schema == NULL)
+		return luaL_error(L, "invalid schema for tool '%s'", name);
+	schema_json = cJSON_PrintUnformatted(schema);
+	cJSON_Delete(schema);
+	if (schema_json == NULL)
+		return luaL_error(L, "out of memory for tool '%s' schema", name);
+
+	/* Keep the handler in the bridge's tools table; the registry entry
+	 * looks the function up by name on dispatch. */
+	lua_rawgeti(L, LUA_REGISTRYINDEX, bridge->tools_ref);
+	lua_pushvalue(L, 4);
+	lua_setfield(L, -2, name);
+	lua_pop(L, 1);
+
+	rc = tools_register(bridge->tools, name, description, schema_json,
+			    requires_approval, lua_tool_handler, bridge);
+	free(schema_json);
+	if (rc != 0) {
+		/* Undo the store to keep the table consistent. */
+		lua_rawgeti(L, LUA_REGISTRYINDEX, bridge->tools_ref);
+		lua_pushnil(L);
+		lua_setfield(L, -2, name);
+		lua_pop(L, 1);
+		return luaL_error(L, "cannot register tool '%s'", name);
+	}
+	return 0;
+}
+
 /** emma.register_hook(event, fn): event is pre_message or post_message. */
 static int l_register_hook(lua_State *L)
 {
@@ -197,6 +445,7 @@ static int l_set_status(lua_State *L)
 static const luaL_Reg emma_funcs[] = {
 	{ "register_command", l_register_command },
 	{ "register_hook",    l_register_hook },
+	{ "register_tool",    l_register_tool },
 	{ "append_message",   l_append_message },
 	{ "set_status",       l_set_status },
 	{ NULL, NULL }
@@ -239,7 +488,10 @@ int lua_bridge_init(lua_bridge_t **bridge, tui_t *tui)
 	b->hooks_ref = luaL_ref(b->L, LUA_REGISTRYINDEX);
 	lua_newtable(b->L);
 	b->cmds_ref = luaL_ref(b->L, LUA_REGISTRYINDEX);
-	if (b->hooks_ref == LUA_NOREF || b->cmds_ref == LUA_NOREF)
+	lua_newtable(b->L);
+	b->tools_ref = luaL_ref(b->L, LUA_REGISTRYINDEX);
+	if (b->hooks_ref == LUA_NOREF || b->cmds_ref == LUA_NOREF ||
+	    b->tools_ref == LUA_NOREF)
 		goto cleanup;
 	if (setup_emma_table(b) != 0)
 		goto cleanup;
@@ -263,6 +515,13 @@ void lua_bridge_set_error_reporter(lua_bridge_t *bridge,
 	bridge->error_ud = userdata;
 }
 
+void lua_bridge_set_tool_registry(lua_bridge_t *bridge, tool_registry_t *reg)
+{
+	if (bridge == NULL)
+		return;
+	bridge->tools = reg;
+}
+
 void lua_bridge_free(lua_bridge_t *bridge)
 {
 	if (bridge == NULL)
@@ -270,6 +529,7 @@ void lua_bridge_free(lua_bridge_t *bridge)
 	if (bridge->L != NULL) {
 		luaL_unref(bridge->L, LUA_REGISTRYINDEX, bridge->hooks_ref);
 		luaL_unref(bridge->L, LUA_REGISTRYINDEX, bridge->cmds_ref);
+		luaL_unref(bridge->L, LUA_REGISTRYINDEX, bridge->tools_ref);
 		lua_close(bridge->L);
 	}
 	free(bridge);

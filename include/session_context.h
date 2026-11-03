@@ -42,5 +42,32 @@ void session_context_free(session_context_t *context);
  */
 int session_context_add_message(session_context_t *context, const char *role, const char *content);
 
+/**
+ * @brief Adds a tool result message (role "tool") answering the tool call
+ *        identified by tool_call_id. Handles resizing and truncation like
+ *        session_context_add_message().
+ * @param context Pointer to the session context.
+ * @param tool_call_id The id of the tool call being answered.
+ * @param content The tool output (text) handed back to the model.
+ * @return 0 on success, -1 on failure (e.g., memory allocation).
+ */
+int session_context_add_tool_result(session_context_t *context,
+                                    const char *tool_call_id,
+                                    const char *content);
+
+/**
+ * @brief Adds an assistant message that requests tool executions. The
+ *        tool_calls array is deep-copied; the caller keeps the ownership
+ *        of its own copy. content may be NULL (tool-only message).
+ * @param context Pointer to the session context.
+ * @param content Optional assistant text accompanying the calls.
+ * @param tool_calls Array of requested tool calls.
+ * @param tool_call_count Number of entries in tool_calls (must be > 0).
+ * @return 0 on success, -1 on failure (e.g., memory allocation).
+ */
+int session_context_add_assistant_tool_calls(session_context_t *context,
+                                             const char *content,
+                                             const openai_tool_call_t *tool_calls,
+                                             size_t tool_call_count);
 
 #endif // SESSION_CONTEXT_H

@@ -42,6 +42,9 @@ SOURCES=(
     "${SRC_DIR}/commands.c"
     "${SRC_DIR}/lua_scripting.c"
     "${SRC_DIR}/agent_loop.c"
+    "${SRC_DIR}/util.c"
+    "${SRC_DIR}/markdown.c"
+    "${SRC_DIR}/tools.c"
 )
 
 # Object files mapping

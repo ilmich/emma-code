@@ -13,6 +13,10 @@ Emma-Code is a lightweight terminal-based interface that allows you to interact 
 - Lua scripting engine: user scripts can register commands, drive the UI
   and hook into the message flow (`pre_message` / `post_message`)
 - Conversation history management with configurable message limits
+- Tool calls: the assistant can execute the built-in tools (`read_file`,
+  `write_file`, `list_dir`, `bash` — the last one asks for confirmation
+  before every execution) and read back their results within the same
+  turn; Lua scripts can register custom tools with `emma.register_tool`
 - HTTP client for OpenAI API integration
 - TOML configuration file support (minimal, dependency-free parser)
 - UTF-8 support for international characters
@@ -51,6 +55,8 @@ model = "gpt-4o-mini"                   # optional, default: gpt-3.5-turbo
 temperature = 0.7                       # optional, default: 0.7
 stream = false                          # optional, default: false; stream the reply via SSE
 scripts_dir = "~/.config/emma/scripts"  # optional, Lua scripts directory
+max_history = 100                       # optional, max messages kept in the session
+max_tool_rounds = 10                    # optional, max tool-call rounds per message
 ```
 
 ### Run
