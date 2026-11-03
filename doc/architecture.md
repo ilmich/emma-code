@@ -62,8 +62,7 @@ graph TD
 | `openai_client` | http_client | libcJSON, libcurl (indiretta) |
 | `http_client` | — | libcurl |
 | `tools` | — | libcjson |
-| `system_prompt` | env_info (per `system_prompt_full`) | — |
-| `env_info` | — | — |
+| `system_prompt` | — | — |
 | `commands` | — | — |
 | `tui` | — | — |
 | `toml` | — | — |
@@ -99,9 +98,11 @@ graph TD
   libcurl. Sopra di lui `openai_client` aggiunge la semantica Chat
   Completion (JSON via cJSON, streaming SSE).
 - **Il messaggio `system` iniziale** è composto da `main.c` con
-  `system_prompt_full()`: il prompt statico (`system_prompt()`) più il
-  blocco ambiente di `env_info` (OS via `uname`, directory corrente,
-  data/ora locale), calcolato una sola volta all'avvio e stabile per
+  `system_prompt_full()`: il prompt statico (`system_prompt()`), più il
+  blocco ambiente (OS via `uname`, directory corrente, data/ora locale)
+  e le istruzioni di progetto lette una sola volta da `./AGENTS.md`
+  quando presente (troncate a 64 KiB con warning), tutto interno a
+  `system_prompt.c`, calcolato una sola volta all'avvio e stabile per
   tutta la sessione (cache-friendly, mai evictato dalla troncatura).
 - **Nessun ciclo**: il grafo è un DAG; le uniche dipendenze "laterali"
   (`lua_scripting → commands/tui`) vanno dal modulo di scripting verso

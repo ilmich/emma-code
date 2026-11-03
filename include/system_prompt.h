@@ -19,14 +19,16 @@
 const char *system_prompt(void);
 
 /**
- * @brief Returns the system prompt with the environment info block
- *        appended (see env_info.h).
+ * @brief Returns the system prompt with the environment info block and
+ *        the project instructions (./AGENTS.md, when present) appended.
  *
  * This is the text actually seeded as the first "system" message of a
- * session: static prompt + environment block, computed once at startup
- * and stable for the whole session. If the environment info cannot be
- * collected, the static prompt alone is returned (with a warning on
- * stderr), so session startup never fails because of it.
+ * session: static prompt + environment block (OS, cwd, local time) +
+ * AGENTS.md block, computed once at startup and stable for the whole
+ * session. If the environment info cannot be collected or AGENTS.md is
+ * absent, the remaining blocks are still returned (with a warning on
+ * stderr where appropriate), so session startup never fails because of
+ * it.
  *
  * @return NUL-terminated heap string owned by the caller (free with
  *         free()), or NULL on allocation failure.
