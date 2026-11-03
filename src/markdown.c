@@ -527,25 +527,19 @@ static int md_push_segment(md_ctx_t *ctx, const char *seg, size_t len,
 	unsigned inh_mask   = (inh_len > 0) ? md_sgr_mask(inh, inh_len) : 0;
 
 	md_sbuf_t sb;
+	char *full = NULL;
+	int rc = -1;
+
 	md_sb_init(&sb);
-	if (inh_mask != 0 && md_sb_raw(&sb, inh, inh_len) != 0) {
-		md_sb_free(&sb);
-		ctx->failed = 1;
-		return -1;
-	}
+	if (inh_mask != 0 && md_sb_raw(&sb, inh, inh_len) != 0)
+		goto cleanup;
 	if (md_sb_raw(&sb, seg, len) != 0 ||
-	    (final_mask != 0 && md_sb_raw(&sb, "\033[0m", 4) != 0)) {
-		md_sb_free(&sb);
-		ctx->failed = 1;
-		return -1;
-	}
+	    (final_mask != 0 && md_sb_raw(&sb, "\033[0m", 4) != 0))
+		goto cleanup;
 	size_t plen = prefix ? strlen(prefix) : 0;
-	char *full = malloc(plen + sb.len + 1);
-	if (!full) {
-		md_sb_free(&sb);
-		ctx->failed = 1;
-		return -1;
-	}
+	full = malloc(plen + sb.len + 1);
+	if (!full)
+		goto cleanup;
 	if (plen > 0) {
 		memcpy(full, prefix, plen);
 	}
@@ -553,13 +547,20 @@ static int md_push_segment(md_ctx_t *ctx, const char *seg, size_t len,
 		memcpy(full + plen, sb.data, sb.len);
 	}
 	full[plen + sb.len] = '\0';
-	md_sb_free(&sb);
 
 	if (md_larr_push_text(&ctx->lines, full) != 0) {
-		ctx->failed = 1;
-		return -1;
+		full = NULL; /* already freed by md_larr_push_text */
+		goto cleanup;
 	}
-	return 0;
+	full = NULL; /* ownership transferred to ctx->lines */
+	rc = 0;
+
+cleanup:
+	md_sb_free(&sb);
+	free(full);
+	if (rc != 0)
+		ctx->failed = 1;
+	return rc;
 }
 
 /**
@@ -767,35 +768,31 @@ static void md_render_code_line(md_ctx_t *ctx, const char *s, size_t len)
 static void md_render_hr(md_ctx_t *ctx)
 {
 	md_sbuf_t sb;
+	int failed = 0;
+
 	md_sb_init(&sb);
 	char   sgr[SGR_MAX];
 	size_t slen = md_sgr_for_mask(MD_B_DIM, sgr);
-	if (md_sb_raw(&sb, sgr, slen) != 0) {
-		md_sb_free(&sb);
-		ctx->failed = 1;
-		return;
-	}
+	if (md_sb_raw(&sb, sgr, slen) != 0)
+		goto cleanup;
 	for (int i = 0; i < ctx->width; i++) {
-		if (md_sb_raw(&sb, "\xe2\x94\x80", 3) != 0) {
-			md_sb_free(&sb);
-			ctx->failed = 1;
-			return;
-		}
+		if (md_sb_raw(&sb, "\xe2\x94\x80", 3) != 0)
+			goto cleanup;
 	}
-	if (md_sb_raw(&sb, "\033[0m", 4) != 0) {
-		md_sb_free(&sb);
-		ctx->failed = 1;
-		return;
-	}
-	if (md_sb_reserve(&sb, 1) != 0) {
-		md_sb_free(&sb);
-		ctx->failed = 1;
-		return;
-	}
+	if (md_sb_raw(&sb, "\033[0m", 4) != 0)
+		goto cleanup;
+	if (md_sb_reserve(&sb, 1) != 0)
+		goto cleanup;
 	sb.data[sb.len] = '\0';
 	if (md_larr_push_text(&ctx->lines, sb.data) != 0) {
-		ctx->failed = 1;
+		failed = 1; /* sb.data already freed by md_larr_push_text */
 	}
+	sb.data = NULL; /* ownership moved to ctx->lines (or already freed) */
+
+cleanup:
+	md_sb_free(&sb);
+	if (failed)
+		ctx->failed = 1;
 }
 
 /* ------------------------------------------------------------------ */
