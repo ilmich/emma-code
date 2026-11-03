@@ -384,34 +384,35 @@ static int p_basic_string(struct parser *ps, toml_value_t *out)
 	 * and abort the string on any bound violation. */
 	size_t cap = (size_t)(ps->end - ps->p);
 	size_t len = 0;
-	char *buf;
+	char *buf = NULL;
+	int rc = -1;
 
 	ps->p++; /* opening quote */
 	buf = malloc(cap);
 	if (buf == NULL) {
 		p_err(ps, "out of memory");
-		return -1;
+		return -1; /* nothing to clean up yet */
 	}
 	while (ps->p < ps->end && *ps->p != '"') {
 		char c = *ps->p;
 
 		if (c == '\n') {
-			free(buf);
 			p_err(ps, "unterminated string");
-			return -1;
+			goto cleanup;
 		}
 		ps->p++;
 		if (c != '\\') {
-			if (sb_putc(buf, cap, &len, c) != 0)
-				goto too_long;
+			if (sb_putc(buf, cap, &len, c) != 0) {
+				p_err(ps, "string too long");
+				goto cleanup;
+			}
 			continue;
 		}
 		if (ps->p >= ps->end) {
-			free(buf);
 			p_err(ps, "unterminated string");
-			return -1;
+			goto cleanup;
 		}
-		c = *ps->p++;
+		c = *ps->p++; 
 		switch (c) {
 		case 'b':
 			c = '\b';
@@ -439,62 +440,57 @@ static int p_basic_string(struct parser *ps, toml_value_t *out)
 			int k;
 
 			if (ps->end - ps->p < hex) {
-				free(buf);
 				p_err(ps, "truncated \\u escape");
-				return -1;
+				goto cleanup;
 			}
 			for (k = 0; k < hex; k++) {
 				int d = p_hexval(*ps->p++);
 
 				if (d < 0) {
-					free(buf);
 					p_err(ps, "invalid \\u escape");
-					return -1;
+					goto cleanup;
 				}
 				cp = cp * 16 + (unsigned)d;
 			}
 			if (cp >= 0xD800 && cp <= 0xDFFF) {
-				free(buf);
 				p_err(ps, "surrogate in \\u escape");
-				return -1;
+				goto cleanup;
 			}
 			if (cp == 0) {
 				/* Strings are NUL-terminated C strings: an embedded
 				 * NUL would silently truncate every getter. */
-				free(buf);
 				p_err(ps, "NUL in \\u escape");
-				return -1;
+				goto cleanup;
 			}
 			if (utf8_put(cp, buf, cap, &len) != 0) {
-				free(buf);
 				p_err(ps, "invalid code point in \\u escape");
-				return -1;
+				goto cleanup;
 			}
 			continue;
 		}
 		default:
-			free(buf);
 			p_err(ps, "invalid escape '\\%c'", c);
-			return -1;
+			goto cleanup;
 		}
-		if (sb_putc(buf, cap, &len, c) != 0)
-			goto too_long;
+		if (sb_putc(buf, cap, &len, c) != 0) {
+			p_err(ps, "string too long");
+			goto cleanup;
+		}
 	}
 	if (ps->p >= ps->end) {
-		free(buf);
 		p_err(ps, "unterminated string");
-		return -1;
+		goto cleanup;
 	}
 	ps->p++; /* closing quote */
 	buf[len] = '\0';
 	out->type = TOML_STRING;
 	out->s = buf;
-	return 0;
+	buf = NULL; /* ownership transferred to out */
+	rc = 0;
 
-too_long:
+cleanup:
 	free(buf);
-	p_err(ps, "string too long");
-	return -1;
+	return rc;
 }
 
 static int p_literal_string(struct parser *ps, toml_value_t *out)
@@ -903,6 +899,7 @@ int toml_parse_string(const char *src, toml_table_t **out, char *errbuf,
 	struct parser ps;
 	toml_table_t *root;
 	toml_table_t *cur;
+	int rc = -1;
 
 	if (src == NULL || out == NULL) {
 		set_err(errbuf, errlen, "invalid argument");
@@ -930,28 +927,29 @@ int toml_parse_string(const char *src, toml_table_t **out, char *errbuf,
 			toml_table_t *t;
 
 			if (p_table_header(&ps, root, &t) != 0)
-				goto fail;
+				goto cleanup;
 			cur = t;
 		} else {
 			if (p_keyval(&ps, &cur) != 0)
-				goto fail;
+				goto cleanup;
 		}
 	}
 	*out = root;
-	return 0;
+	root = NULL; /* ownership transferred to out */
+	rc = 0;
 
-fail:
+cleanup:
 	toml_free(root);
-	return -1;
+	return rc;
 }
 
 int toml_parse_file(const char *path, toml_table_t **out, char *errbuf,
 		    size_t errlen)
 {
-	FILE *f;
+	FILE *f = NULL;
 	long sz;
-	char *buf;
-	int rc;
+	char *buf = NULL;
+	int rc = -1;
 
 	if (path == NULL || out == NULL) {
 		set_err(errbuf, errlen, "invalid argument");
@@ -961,29 +959,27 @@ int toml_parse_file(const char *path, toml_table_t **out, char *errbuf,
 	f = fopen(path, "rb");
 	if (f == NULL) {
 		set_err(errbuf, errlen, "cannot open '%s'", path);
-		return -1;
+		return -1; /* nothing to clean up yet */
 	}
 	if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) < 0 ||
 	    fseek(f, 0, SEEK_SET) != 0) {
-		fclose(f);
 		set_err(errbuf, errlen, "cannot read '%s'", path);
-		return -1;
+		goto cleanup;
 	}
 	buf = malloc((size_t)sz + 1);
 	if (buf == NULL) {
-		fclose(f);
 		set_err(errbuf, errlen, "out of memory");
-		return -1;
+		goto cleanup;
 	}
 	if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
-		fclose(f);
-		free(buf);
 		set_err(errbuf, errlen, "cannot read '%s'", path);
-		return -1;
+		goto cleanup;
 	}
-	fclose(f);
 	buf[sz] = '\0';
 	rc = toml_parse_string(buf, out, errbuf, errlen);
+
+cleanup:
+	fclose(f);
 	free(buf);
 	return rc;
 }
