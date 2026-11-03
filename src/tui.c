@@ -482,16 +482,17 @@ void tui_render(tui_t *tui) {
 
 int tui_init(tui_t **out) {
     tui_t *tui = calloc(1, sizeof(tui_t));
+    int rc = -1;
+
     if (!tui) {
         fprintf(stderr, "tui_init: calloc failed\n");
-        return -1;
+        return -1; /* nothing to clean up yet */
     }
 
     tui->messages = malloc(MESSAGES_INIT * sizeof(tui_message_t));
     if (!tui->messages) {
         fprintf(stderr, "tui_init: malloc messages failed\n");
-        free(tui);
-        return -1;
+        goto cleanup;
     }
     tui->msg_cap = MESSAGES_INIT;
 
@@ -499,9 +500,7 @@ int tui_init(tui_t **out) {
     tui->input_buf = malloc(tui->input_cap);
     if (!tui->input_buf) {
         fprintf(stderr, "tui_init: malloc input_buf failed\n");
-        free(tui->messages);
-        free(tui);
-        return -1;
+        goto cleanup;
     }
     tui->input_buf[0] = '\0';
 
@@ -509,10 +508,7 @@ int tui_init(tui_t **out) {
 
     if (tui_enter_raw(tui) != 0) {
         fprintf(stderr, "tui_init: failed to enter raw mode\n");
-        free(tui->input_buf);
-        free(tui->messages);
-        free(tui);
-        return -1;
+        goto cleanup;
     }
 
     g_tui = tui;
@@ -532,7 +528,16 @@ int tui_init(tui_t **out) {
     write_str(ANSI_CURSOR_HOME);
 
     *out = tui;
-    return 0;
+    tui = NULL; /* ownership transferred to the caller */
+    rc = 0;
+
+cleanup:
+    if (tui != NULL) {
+        free(tui->input_buf);
+        free(tui->messages);
+        free(tui);
+    }
+    return rc;
 }
 
 void tui_free(tui_t *tui) {
