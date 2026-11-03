@@ -15,6 +15,7 @@
 #include "lua_scripting.h"
 #include "openai_client.h"
 #include "session_context.h"
+#include "system_prompt.h"
 #include "toml.h"
 #include "tools.h"
 #include "tui.h"
@@ -324,6 +325,14 @@ int main(void) {
 
     if (session_context_init(&context, max_history) != 0)
         goto cleanup;
+
+    /* Seed the session with the built-in system prompt as the very first
+     * message: the truncation policy never evicts role "system", so the
+     * prompt stays a stable, cache-friendly prefix of every request. */
+    if (session_context_add_message(&context, "system", system_prompt()) != 0) {
+        fprintf(stderr, "emma: out of memory\n");
+        goto cleanup;
+    }
 
     if (tui_init(&tui) != 0)
         goto cleanup;

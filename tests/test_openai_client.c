@@ -271,6 +271,33 @@ static void test_chat_completion_temperature_sent(void)
 	openai_response_free(&resp);
 }
 
+static void test_chat_completion_system_message_first(void)
+{
+	char base[128];
+	openai_config_t cfg;
+	openai_message_t msgs[2] = {0};
+	openai_response_t resp = {0};
+
+	if (build_url(base, sizeof(base), "sysfirst") != 0) {
+		return;
+	}
+	/* The mock server rejects the request with 400 unless the first
+	 * message of the payload is a non-empty system message: proves the
+	 * client serializes messages in the given order, so a system prompt
+	 * seeded as the first session message stays the cache-friendly
+	 * prefix of every request. */
+	cfg = make_config(base);
+	msgs[0].role = (char *)"system";
+	msgs[0].content = (char *)"You are emma.";
+	msgs[1].role = (char *)"user";
+	msgs[1].content = (char *)"Hello";
+	resp.content = NULL;
+
+	TEST_CHECK_INT_EQ(openai_chat_completion(&cfg, msgs, 2, &resp), 0);
+	TEST_CHECK_STR_EQ(resp.content, "Hello from mock!");
+	openai_response_free(&resp);
+}
+
 static void test_chat_completion_no_api_key(void)
 {
 	char base[128];
@@ -596,6 +623,7 @@ int main(void)
 	TEST_RUN(test_chat_completion_malformed_json_body);
 	TEST_RUN(test_chat_completion_empty_choices);
 	TEST_RUN(test_chat_completion_missing_content);
+	TEST_RUN(test_chat_completion_system_message_first);
 	TEST_RUN(test_chat_completion_temperature_sent);
 	TEST_RUN(test_chat_completion_no_api_key);
 	TEST_RUN(test_chat_completion_unexpected_api_key);

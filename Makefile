@@ -27,7 +27,8 @@ TESTBIN := $(BUILDDIR)/tests
 SOURCES := $(SRCDIR)/main.c $(SRCDIR)/http_client.c $(SRCDIR)/openai_client.c \
 	$(SRCDIR)/session_context.c $(SRCDIR)/tui.c $(SRCDIR)/toml.c \
 	$(SRCDIR)/commands.c $(SRCDIR)/lua_scripting.c $(SRCDIR)/agent_loop.c \
-	$(SRCDIR)/util.c $(SRCDIR)/markdown.c $(SRCDIR)/tools.c
+	$(SRCDIR)/util.c $(SRCDIR)/markdown.c $(SRCDIR)/tools.c \
+	$(SRCDIR)/system_prompt.c
 OBJECTS := $(SOURCES:$(SRCDIR)/%.c=$(BUILDDIR)/%.o)
 
 all: $(TARGET)
@@ -49,7 +50,8 @@ clean:
 test: $(TESTBIN)/test_session_context $(TESTBIN)/test_openai_client \
 	$(TESTBIN)/test_http_client $(TESTBIN)/test_toml $(TESTBIN)/test_commands \
 	$(TESTBIN)/test_lua_scripting $(TESTBIN)/test_tui $(TESTBIN)/test_agent_loop \
-	$(TESTBIN)/test_util $(TESTBIN)/test_markdown $(TESTBIN)/test_tools
+	$(TESTBIN)/test_util $(TESTBIN)/test_markdown $(TESTBIN)/test_tools \
+	$(TESTBIN)/test_system_prompt
 	$(TESTDIR)/run_tests.sh
 
 # End-to-end routing checks against the local mock OpenAI server.
@@ -86,6 +88,11 @@ $(TESTBIN)/test_session_context: $(TESTDIR)/test_session_context.c $(TESTDIR)/te
 
 $(TESTBIN)/test_openai_client: $(TESTDIR)/test_openai_client.c $(TESTDIR)/test.h $(BUILDDIR)/openai_client.o $(BUILDDIR)/http_client.o $(BUILDDIR)/util.o | $(TESTBIN)
 	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_openai_client.c $(BUILDDIR)/openai_client.o $(BUILDDIR)/http_client.o $(BUILDDIR)/util.o $(CURL_LIBS) $(CJSON_LIBS) -o $@
+
+$(TESTBIN)/test_system_prompt: $(TESTDIR)/test_system_prompt.c $(TESTDIR)/test.h \
+		$(BUILDDIR)/system_prompt.o | $(TESTBIN)
+	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_system_prompt.c \
+		$(BUILDDIR)/system_prompt.o -o $@
 
 $(TESTBIN)/test_http_client: $(TESTDIR)/test_http_client.c $(TESTDIR)/test.h $(BUILDDIR)/http_client.o | $(TESTBIN)
 	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_http_client.c $(BUILDDIR)/http_client.o $(CURL_LIBS) -o $@

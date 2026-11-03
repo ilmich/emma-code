@@ -41,6 +41,9 @@ Scenarios are selected by the first path segment, e.g. a request to
                  tool loop, used to test the round limit
   toolreq      - 200 with the standard reply only when the request body
                  carries a non-empty "tools" array (POST); 400 otherwise
+  sysfirst     - 200 with the standard reply only when the first message
+                 in the request body has role "system" with non-empty
+                 content (POST); 400 otherwise
   ssetoolround - two-phase streaming tool round-trip (POST): when the
                  request body contains a role "tool" message an
                  aistream-style text stream is returned, otherwise an
@@ -205,7 +208,20 @@ class MockHandler(BaseHTTPRequestHandler):
             self._respond(400, b'{"error": "invalid payload"}')
             return
 
-        if scenario == "ok":
+        if scenario == "sysfirst":
+            # Cache-friendly system prompt: must be the very first
+            # message, with non-empty content.
+            msgs = payload.get("messages")
+            first = msgs[0] if isinstance(msgs, list) and msgs else None
+            if (isinstance(first, dict) and first.get("role") == "system"
+                    and first.get("content")):
+                self._respond(200, json.dumps(VALID_RESPONSE).encode())
+            else:
+                self._respond(400,
+                              b'{"error": "first message must be a '
+                              b'non-empty system message"}')
+
+        elif scenario == "ok":
             self._respond(200, json.dumps(VALID_RESPONSE).encode())
 
         elif scenario == "aistream":
