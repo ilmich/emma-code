@@ -303,8 +303,9 @@ static int send_request(
     char auth_header[512];
     char *headers[2];
     size_t headers_count = 0;
-    char *payload;
+    char *payload = NULL;
     struct http_request_t req;
+    int status = 1;
     int n;
 
     // The API key is optional: only add the Authorization header when one
@@ -343,22 +344,24 @@ static int send_request(
     memset(resp, 0, sizeof(*resp));
     if (http_request(&req, resp) != 0) {
         fprintf(stderr, "HTTP Request failed.\n");
-        http_response_free(resp);
-        free(payload);
-        return 1;
+        goto cleanup;
     }
 
     // Handle HTTP-level errors
     if (resp->status_code != 200) {
         fprintf(stderr, "API Error: Received status code %d. Body: %s\n",
                 resp->status_code, resp->body ? resp->body : "No body");
-        http_response_free(resp);
-        free(payload);
-        return 1;
+        goto cleanup;
     }
 
+    status = 0;
+
+cleanup:
     free(payload);
-    return 0;
+    if (status != 0) {
+        http_response_free(resp);
+    }
+    return status;
 }
 
 int openai_chat_completion(
@@ -391,45 +394,42 @@ int openai_chat_completion_stream(
 {
     struct stream_ctx ctx = {0};
     struct http_response_t resp;
-    int status;
+    int status = 1;
 
     ctx.on_delta = on_delta;
     ctx.user_data = user_data;
 
     if (send_request(config, messages, message_count, 1, stream_event,
                      &ctx, &resp) != 0) {
-        free(ctx.content);
-        return 1;
+        goto cleanup;
     }
 
     if (ctx.got_event) {
         // Server honored "stream": true. The accumulated buffer holds the
         // full text; an event-only stream without content yields "".
-        status = 0;
-        if (ctx.oom) {
-            status = 1;
-        } else if (ctx.content != NULL) {
-            response->content = ctx.content;
-            ctx.content = NULL; // ownership transferred
-        } else {
-            response->content = (char *)malloc(1);
-            if (response->content == NULL) {
-                fprintf(stderr, "Error: out of memory for response content\n");
-                status = 1;
+        if (!ctx.oom) {
+            if (ctx.content != NULL) {
+                response->content = ctx.content;
+                ctx.content = NULL; // ownership transferred
             } else {
-                response->content[0] = '\0';
+                response->content = (char *)malloc(1);
+                if (response->content == NULL) {
+                    fprintf(stderr, "Error: out of memory for response content\n");
+                } else {
+                    response->content[0] = '\0';
+                }
             }
         }
-        if (status != 0) {
-            free(ctx.content);
-        }
+        status = (ctx.oom || response->content == NULL) ? 1 : 0;
     } else {
         // The server ignored "stream": true and answered with a plain JSON
         // body: fall back to the non-streaming parser.
         status = parse_response(resp.body, response);
     }
 
+cleanup:
     http_response_free(&resp);
+    free(ctx.content);
     return status;
 }
 
