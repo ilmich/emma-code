@@ -303,6 +303,7 @@ static void on_delta(const char *text, void *user_data)
 int main(void) {
     openai_config_t config;
     char *scripts_dir = NULL;
+    char *prompt = NULL;
     session_context_t context = {0};
     tui_t *tui = NULL;
     lua_bridge_t *bridge = NULL;
@@ -326,10 +327,13 @@ int main(void) {
     if (session_context_init(&context, max_history) != 0)
         goto cleanup;
 
-    /* Seed the session with the built-in system prompt as the very first
-     * message: the truncation policy never evicts role "system", so the
-     * prompt stays a stable, cache-friendly prefix of every request. */
-    if (session_context_add_message(&context, "system", system_prompt()) != 0) {
+    /* Seed the session with the built-in system prompt (plus the
+     * environment info block) as the very first message: the truncation
+     * policy never evicts role "system", so the prompt stays a stable,
+     * cache-friendly prefix of every request. */
+    prompt = system_prompt_full();
+    if (prompt == NULL ||
+        session_context_add_message(&context, "system", prompt) != 0) {
         fprintf(stderr, "emma: out of memory\n");
         goto cleanup;
     }
@@ -467,6 +471,7 @@ cleanup:
     if (commands_ready) {
         commands_free();
     }
+    free(prompt);
     session_context_free(&context);
     config_free_strings(&config);
     if (http_ready) {

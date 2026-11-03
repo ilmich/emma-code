@@ -45,6 +45,8 @@ SOURCES=(
     "${SRC_DIR}/util.c"
     "${SRC_DIR}/markdown.c"
     "${SRC_DIR}/tools.c"
+    "${SRC_DIR}/system_prompt.c"
+    "${SRC_DIR}/env_info.c"
 )
 
 # Object files mapping
