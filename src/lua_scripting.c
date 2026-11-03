@@ -221,37 +221,37 @@ static int setup_emma_table(lua_bridge_t *bridge)
 int lua_bridge_init(lua_bridge_t **bridge, tui_t *tui)
 {
 	lua_bridge_t *b;
+	int rc = -1;
 
 	if (bridge == NULL)
 		return -1;
 	*bridge = NULL;
 	b = calloc(1, sizeof(*b));
 	if (b == NULL)
-		return -1;
+		return -1; /* nothing to clean up yet */
 	b->tui = tui;
 	b->L = luaL_newstate();
-	if (b->L == NULL) {
-		free(b);
-		return -1;
-	}
+	if (b->L == NULL)
+		goto cleanup;
 	luaL_openlibs(b->L);
 
 	lua_newtable(b->L);
 	b->hooks_ref = luaL_ref(b->L, LUA_REGISTRYINDEX);
 	lua_newtable(b->L);
 	b->cmds_ref = luaL_ref(b->L, LUA_REGISTRYINDEX);
-	if (b->hooks_ref == LUA_NOREF || b->cmds_ref == LUA_NOREF) {
-		lua_close(b->L);
-		free(b);
-		return -1;
-	}
-	if (setup_emma_table(b) != 0) {
-		lua_close(b->L);
-		free(b);
-		return -1;
-	}
+	if (b->hooks_ref == LUA_NOREF || b->cmds_ref == LUA_NOREF)
+		goto cleanup;
+	if (setup_emma_table(b) != 0)
+		goto cleanup;
 	*bridge = b;
-	return 0;
+	b = NULL; /* ownership transferred to *bridge */
+	rc = 0;
+
+cleanup:
+	if (b != NULL && b->L != NULL)
+		lua_close(b->L);
+	free(b);
+	return rc;
 }
 
 void lua_bridge_set_error_reporter(lua_bridge_t *bridge,
@@ -353,7 +353,7 @@ int lua_bridge_load_scripts(lua_bridge_t *bridge, const char *dir)
 		copy = util_strdup(name);
 		if (copy == NULL) {
 			rc = -1;
-			break;
+			goto cleanup;
 		}
 		if (count == cap) {
 			size_t ncap = cap == 0 ? 8 : cap * 2;
@@ -362,41 +362,38 @@ int lua_bridge_load_scripts(lua_bridge_t *bridge, const char *dir)
 			if (grown == NULL) {
 				free(copy);
 				rc = -1;
-				break;
+				goto cleanup;
 			}
 			names = grown;
 			cap = ncap;
 		}
 		names[count++] = copy;
 	}
-	closedir(d);
 
-	if (rc != 0) {
-		free_names(names, count);
-		bridge_error(bridge, "out of memory loading scripts");
-		return -1;
-	}
 	if (count > 1)
 		qsort(names, count, sizeof(*names), cmp_names);
 
-	for (size_t i = 0; i < count && rc == 0; i++) {
+	for (size_t i = 0; i < count; i++) {
 		size_t dlen = strlen(dir);
 		size_t nlen = strlen(names[i]);
 		char *path = malloc(dlen + 1 + nlen + 1);
 
 		if (path == NULL) {
 			rc = -1;
-			break;
+			goto cleanup;
 		}
 		if (snprintf(path, dlen + 2 + nlen, "%s/%s", dir, names[i]) >=
 		    (int)(dlen + 2 + nlen)) {
 			free(path);
 			rc = -1;
-			break;
+			goto cleanup;
 		}
 		run_script(bridge, path);
 		free(path);
 	}
+
+cleanup:
+	closedir(d);
 	free_names(names, count);
 	if (rc != 0)
 		bridge_error(bridge, "out of memory loading scripts");
@@ -414,6 +411,7 @@ int lua_bridge_apply_hook(lua_bridge_t *bridge, const char *event,
 	size_t count;
 	char *acc = NULL;
 	const char *current = payload;
+	int rc = -1;
 
 	if (bridge == NULL || bridge->L == NULL || event == NULL ||
 	    payload == NULL || out == NULL)
@@ -426,41 +424,37 @@ int lua_bridge_apply_hook(lua_bridge_t *bridge, const char *event,
 	L = bridge->L;
 	lua_rawgeti(L, LUA_REGISTRYINDEX, bridge->hooks_ref); /* hooks */
 	lua_getfield(L, -1, event);                           /* hooks arr */
-	if (!lua_istable(L, -1)) {
-		lua_pop(L, 2);
-		return 0;
-	}
-	count = lua_rawlen(L, -1);
-	for (size_t i = 1; i <= count; i++) {
-		lua_rawgeti(L, -1, (lua_Integer)i);           /* hooks arr fn */
-		lua_pushstring(L, current);
-		if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
-			const char *msg = lua_tostring(L, -1);
+	if (lua_istable(L, -1)) {
+		count = lua_rawlen(L, -1);
+		for (size_t i = 1; i <= count; i++) {
+			lua_rawgeti(L, -1, (lua_Integer)i);       /* hooks arr fn */
+			lua_pushstring(L, current);
+			if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+				const char *msg = lua_tostring(L, -1);
 
-			bridge_error(bridge, "lua hook '%s' error: %s", event,
-				     msg != NULL ? msg : "unknown error");
-			lua_pop(L, 1); /* error message */
-			continue;      /* pass-through on hook failure */
-		}
-		if (lua_isstring(L, -1)) {
-			const char *r = lua_tostring(L, -1);
-
-			if (strcmp(r, current) != 0) {
-				char *copy = util_strdup(r);
-
-				if (copy == NULL) {
-					lua_pop(L, 3);
-					free(acc);
-					return -1;
-				}
-				free(acc);
-				acc = copy;
-				current = acc;
+				bridge_error(bridge, "lua hook '%s' error: %s", event,
+					     msg != NULL ? msg : "unknown error");
+				lua_pop(L, 1); /* error message */
+				continue;      /* pass-through on hook failure */
 			}
+			if (lua_isstring(L, -1)) {
+				const char *r = lua_tostring(L, -1);
+
+				if (strcmp(r, current) != 0) {
+					char *copy = util_strdup(r);
+
+					if (copy == NULL) {
+						lua_pop(L, 1); /* hook result */
+						goto cleanup;
+					}
+					free(acc);
+					acc = copy;
+					current = acc;
+				}
+			}
+			lua_pop(L, 1); /* hook result */
 		}
-		lua_pop(L, 1); /* hook result */
 	}
-	lua_pop(L, 2); /* arr + hooks */
 
 	/* Only surface a result when it actually differs from the input. */
 	if (acc != NULL && strcmp(acc, payload) == 0) {
@@ -468,5 +462,11 @@ int lua_bridge_apply_hook(lua_bridge_t *bridge, const char *event,
 		acc = NULL;
 	}
 	*out = acc;
-	return 0;
+	acc = NULL; /* ownership transferred to *out */
+	rc = 0;
+
+cleanup:
+	lua_pop(L, 2); /* arr + hooks */
+	free(acc);
+	return rc;
 }
