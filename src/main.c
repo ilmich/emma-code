@@ -114,19 +114,19 @@ static int load_config(openai_config_t *config, char **scripts_dir)
 
 	if (toml_get_string(doc, "base_url", &s) != 0) {
 		fprintf(stderr, "emma: missing base_url in %s\n", path);
-		goto out;
+		goto cleanup;
 	}
 	config->base_url = util_strdup(s);
 	if (config->base_url == NULL) {
 		fprintf(stderr, "emma: out of memory\n");
-		goto out;
+		goto cleanup;
 	}
 
 	if (toml_get_string(doc, "api_key", &s) == 0) {
 		config->api_key = util_strdup(s);
 		if (config->api_key == NULL) {
 			fprintf(stderr, "emma: out of memory\n");
-			goto out;
+			goto cleanup;
 		}
 	}
 
@@ -137,7 +137,7 @@ static int load_config(openai_config_t *config, char **scripts_dir)
 	}
 	if (config->model_name == NULL) {
 		fprintf(stderr, "emma: out of memory\n");
-		goto out;
+		goto cleanup;
 	}
 
 	if (toml_get_double(doc, "temperature", &d) == 0)
@@ -152,12 +152,12 @@ static int load_config(openai_config_t *config, char **scripts_dir)
 		*scripts_dir = util_strdup(s);
 		if (*scripts_dir == NULL) {
 			fprintf(stderr, "emma: out of memory\n");
-			goto out;
+			goto cleanup;
 		}
 	}
 
 	rc = 0;
-out:
+cleanup:
 	toml_free(doc);
 	if (rc != 0) {
 		config_free_strings(config);
@@ -186,50 +186,38 @@ static void on_delta(const char *text, void *user_data)
 }
 
 int main(void) {
+    openai_config_t config;
+    char *scripts_dir = NULL;
+    session_context_t context = {0};
+    tui_t *tui = NULL;
+    lua_bridge_t *bridge = NULL;
+    int commands_ready = 0;
+    int http_ready = 0;
+    int status = 1;
+
     if (http_client_init() != 0) {
         return 1;
     }
+    http_ready = 1;
 
-    openai_config_t config;
-    char *scripts_dir = NULL;
-    if (load_config(&config, &scripts_dir) != 0) {
-        http_client_cleanup();
-        return 1;
-    }
+    if (load_config(&config, &scripts_dir) != 0)
+        goto cleanup;
 
-    session_context_t context = {0};
-    if (session_context_init(&context, MAX_HISTORY) != 0) {
-        config_free_strings(&config);
-        http_client_cleanup();
-        return 1;
-    }
+    if (session_context_init(&context, MAX_HISTORY) != 0)
+        goto cleanup;
 
-    tui_t *tui = NULL;
-    if (tui_init(&tui) != 0) {
-        session_context_free(&context);
-        config_free_strings(&config);
-        http_client_cleanup();
-        return 1;
-    }
+    if (tui_init(&tui) != 0)
+        goto cleanup;
 
     if (commands_init() != 0) {
         fprintf(stderr, "emma: failed to initialize command registry\n");
-        session_context_free(&context);
-        config_free_strings(&config);
-        free(scripts_dir);
-        http_client_cleanup();
-        return 1;
+        goto cleanup;
     }
+    commands_ready = 1;
 
-    lua_bridge_t *bridge = NULL;
     if (lua_bridge_init(&bridge, tui) != 0) {
         fprintf(stderr, "emma: failed to initialize Lua scripting engine\n");
-        session_context_free(&context);
-        config_free_strings(&config);
-        free(scripts_dir);
-        http_client_cleanup();
-        commands_free();
-        return 1;
+        goto cleanup;
     }
 
     if (scripts_dir == NULL) {
@@ -318,11 +306,21 @@ int main(void) {
         free(reply);
     }
 
-    tui_free(tui);
+    status = 0;
+
+cleanup:
+    free(scripts_dir);
+    if (tui != NULL) {
+        tui_free(tui);
+    }
     lua_bridge_free(bridge);
+    if (commands_ready) {
+        commands_free();
+    }
     session_context_free(&context);
     config_free_strings(&config);
-    http_client_cleanup();
-    commands_free();
-    return 0;
+    if (http_ready) {
+        http_client_cleanup();
+    }
+    return status;
 }
