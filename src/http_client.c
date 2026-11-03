@@ -175,28 +175,38 @@ void http_client_cleanup(void) {
     curl_global_cleanup();
 }
 
+/** Frees an array of `count` header strings plus the array itself. */
+static void http_headers_free(char **headers, size_t count) {
+    if (headers == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        free(headers[i]);
+    }
+    free(headers);
+}
+
 int http_request(const struct http_request_t *req, struct http_response_t *resp) {
-    CURL *curl;
+    CURL *curl = NULL;
     CURLcode res;
-    struct mem_struct chunk;
+    struct mem_struct chunk = {0};
+    struct curl_slist *header_list = NULL;
     long response_code;
+    int status = 1;
 
     curl = curl_easy_init();
     if (!curl) {
         return 1;
     }
 
-    chunk.data = malloc(1);    
+    chunk.data = malloc(1);
     if (!chunk.data) {
-        curl_easy_cleanup(curl);
-        return 1;
+        goto cleanup;
     }
     // Always NUL-terminate so the body is a valid C string even if the
     // response has an empty body.
     chunk.data[0] = '\0';
     chunk.size = 0;
-    chunk.headers = NULL;
-    chunk.headers_count = 0;
     chunk.callback = req->callback;
     chunk.user_data = req->user_data;
     chunk.last_pos = 0;
@@ -220,16 +230,12 @@ int http_request(const struct http_request_t *req, struct http_response_t *resp)
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req->body);
     }
 
-    struct curl_slist *header_list = NULL;
     if (req->headers && req->headers_count > 0) {
         for (size_t i = 0; i < req->headers_count; i++) {
             struct curl_slist *tmp = curl_slist_append(header_list, req->headers[i]);
             if (!tmp) {
                 fprintf(stderr, "curl_slist_append() failed\n");
-                curl_slist_free_all(header_list);
-                free(chunk.data);
-                curl_easy_cleanup(curl);
-                return 1;
+                goto cleanup;
             }
             header_list = tmp;
         }
@@ -242,18 +248,7 @@ int http_request(const struct http_request_t *req, struct http_response_t *resp)
     res = curl_easy_perform(curl);
     if (res != CURLE_OK) {
         fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
-        free(chunk.data);
-        curl_easy_cleanup(curl);
-        if (header_list) {
-            curl_slist_free_all(header_list);
-        }
-        if (chunk.headers) {
-            for (size_t i = 0; i < chunk.headers_count; i++) {
-                free(chunk.headers[i]);
-            }
-        }
-	free(chunk.headers);
-        return 1;
+        goto cleanup;
     }
 
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
@@ -263,12 +258,20 @@ int http_request(const struct http_request_t *req, struct http_response_t *resp)
     resp->body_len = chunk.size;
     resp->headers = chunk.headers;
     resp->headers_count = chunk.headers_count;
+    chunk.data = NULL;      /* ownership transferred to resp */
+    chunk.headers = NULL;
+    status = 0;
 
-    curl_easy_cleanup(curl);
+cleanup:
+    if (curl) {
+        curl_easy_cleanup(curl);
+    }
     if (header_list) {
         curl_slist_free_all(header_list);
     }
-    return 0;
+    free(chunk.data);
+    http_headers_free(chunk.headers, chunk.headers_count);
+    return status;
 }
 
 void http_response_free(struct http_response_t* response) {
@@ -277,23 +280,11 @@ void http_response_free(struct http_response_t* response) {
     }
 
     // Free the body string
-    if (response->body != NULL) {
-        free(response->body);
-        response->body = NULL;
-    }
+    free(response->body);
+    response->body = NULL;
 
-    // Free each header string
-    if (response->headers != NULL) {
-        for (size_t i = 0; i < response->headers_count; i++) {
-            if (response->headers[i] != NULL) {
-                free(response->headers[i]);
-                response->headers[i] = NULL;
-            }
-        }
-	// Free the array of header pointers
-	free(response->headers);
-	response->headers = NULL;
-	response->headers_count = 0;
-    }
-
+    // Free each header string and the array of header pointers
+    http_headers_free(response->headers, response->headers_count);
+    response->headers = NULL;
+    response->headers_count = 0;
 }
