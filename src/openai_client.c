@@ -336,6 +336,24 @@ static int parse_response(const char *body, openai_response_t *response) {
         response->content = content_copy;
     }
 
+    // Reasoning text (when the model provides it): prefer the
+    // "reasoning_content" spelling, fall back to "reasoning".
+    cJSON *reasoning = cJSON_GetObjectItem(message, "reasoning_content");
+    if (!cJSON_IsString(reasoning))
+        reasoning = cJSON_GetObjectItem(message, "reasoning");
+    if (cJSON_IsString(reasoning) && reasoning->valuestring != NULL &&
+        reasoning->valuestring[0] != '\0') {
+        char *reasoning_copy = (char *)malloc(strlen(reasoning->valuestring) + 1);
+        if (!reasoning_copy) {
+            perror("Failed to allocate memory for response reasoning");
+            cJSON_Delete(root);
+            return 1;
+        }
+
+        strcpy(reasoning_copy, reasoning->valuestring);
+        response->reasoning = reasoning_copy;
+    }
+
     // Extract the requested tool calls, if any.
     cJSON *tool_calls = cJSON_GetObjectItem(message, "tool_calls");
     if (cJSON_IsArray(tool_calls) && cJSON_GetArraySize(tool_calls) > 0) {
@@ -366,6 +384,9 @@ struct stream_ctx {
     char *content;                       /**< accumulated full text (owned) */
     size_t len;                          /**< current length of content */
     size_t cap;                          /**< allocated capacity of content */
+    char *reasoning;                     /**< accumulated reasoning (owned) */
+    size_t reasoning_len;                /**< current length of reasoning */
+    size_t reasoning_cap;                /**< allocated capacity of reasoning */
     openai_tool_call_t *tool_calls;      /**< accumulated tool calls (owned) */
     size_t tool_call_count;              /**< number of accumulated calls */
     size_t tool_call_cap;                /**< allocated capacity of tool_calls */
@@ -475,6 +496,39 @@ static int stream_accumulate_tool_call(struct stream_ctx *ctx,
 }
 
 /**
+ * @brief Appends text to a growable accumulator buffer (content or
+ *        reasoning fragments are concatenated into the same allocation).
+ *
+ * @return 0 on success, -1 on allocation failure (ctx->oom is set).
+ */
+static int stream_buf_append(struct stream_ctx *ctx, char **buf,
+                             size_t *len, size_t *cap, const char *text,
+                             size_t text_len)
+{
+    if (*len + text_len + 1 > *cap) {
+        size_t new_cap = *cap ? *cap : 64;
+        char *tmp;
+
+        while (new_cap < *len + text_len + 1) {
+            new_cap *= 2;
+        }
+        tmp = realloc(*buf, new_cap);
+        if (tmp == NULL) {
+            fprintf(stderr, "Error: out of memory while accumulating "
+                    "streamed response\n");
+            ctx->oom = 1;
+            return -1;
+        }
+        *buf = tmp;
+        *cap = new_cap;
+    }
+    memcpy(*buf + *len, text, text_len);
+    *len += text_len;
+    (*buf)[*len] = '\0';
+    return 0;
+}
+
+/**
  * @brief Appends a delta to the accumulated stream content.
  *
  * @return 0 on success, -1 on allocation failure (ctx->oom is set).
@@ -482,27 +536,20 @@ static int stream_accumulate_tool_call(struct stream_ctx *ctx,
 static int stream_accumulate(struct stream_ctx *ctx, const char *text,
                              size_t text_len)
 {
-    if (ctx->len + text_len + 1 > ctx->cap) {
-        size_t new_cap = ctx->cap ? ctx->cap : 64;
-        char *tmp;
+    return stream_buf_append(ctx, &ctx->content, &ctx->len, &ctx->cap,
+                             text, text_len);
+}
 
-        while (new_cap < ctx->len + text_len + 1) {
-            new_cap *= 2;
-        }
-        tmp = realloc(ctx->content, new_cap);
-        if (tmp == NULL) {
-            fprintf(stderr, "Error: out of memory while accumulating "
-                    "streamed response\n");
-            ctx->oom = 1;
-            return -1;
-        }
-        ctx->content = tmp;
-        ctx->cap = new_cap;
-    }
-    memcpy(ctx->content + ctx->len, text, text_len);
-    ctx->len += text_len;
-    ctx->content[ctx->len] = '\0';
-    return 0;
+/**
+ * @brief Appends a delta to the accumulated stream reasoning.
+ *
+ * @return 0 on success, -1 on allocation failure (ctx->oom is set).
+ */
+static int stream_accumulate_reasoning(struct stream_ctx *ctx,
+                                       const char *text, size_t text_len)
+{
+    return stream_buf_append(ctx, &ctx->reasoning, &ctx->reasoning_len,
+                             &ctx->reasoning_cap, text, text_len);
 }
 
 /**
@@ -568,7 +615,24 @@ static void stream_event(const char *buffer, size_t size, void *user_data)
         text = content->valuestring;
         if (stream_accumulate(ctx, text, strlen(text)) == 0 &&
             ctx->on_delta != NULL) {
-            ctx->on_delta(text, ctx->user_data);
+            ctx->on_delta(text, 0, ctx->user_data);
+        }
+    }
+
+    // Reasoning deltas (reasoning_content, or the "reasoning" spelling
+    // used by some providers): accumulate and forward with the flag set.
+    if (cJSON_IsObject(delta)) {
+        cJSON *reasoning = cJSON_GetObjectItem(delta, "reasoning_content");
+
+        if (!cJSON_IsString(reasoning))
+            reasoning = cJSON_GetObjectItem(delta, "reasoning");
+        if (cJSON_IsString(reasoning) && reasoning->valuestring != NULL &&
+            reasoning->valuestring[0] != '\0') {
+            text = reasoning->valuestring;
+            if (stream_accumulate_reasoning(ctx, text, strlen(text)) == 0 &&
+                ctx->on_delta != NULL) {
+                ctx->on_delta(text, 1, ctx->user_data);
+            }
         }
     }
 
@@ -728,6 +792,11 @@ int openai_chat_completion_stream(
                     response->content[0] = '\0';
                 }
             }
+            // Transfer any accumulated reasoning to the response.
+            if (response->content != NULL && ctx.reasoning != NULL) {
+                response->reasoning = ctx.reasoning;
+                ctx.reasoning = NULL; // ownership transferred
+            }
             // Transfer any accumulated tool calls to the response.
             if (response->content != NULL && ctx.tool_calls != NULL) {
                 response->tool_calls = ctx.tool_calls;
@@ -746,6 +815,7 @@ int openai_chat_completion_stream(
 cleanup:
     http_response_free(&resp);
     free(ctx.content);
+    free(ctx.reasoning);
     openai_tool_calls_free(ctx.tool_calls, ctx.tool_call_count);
     return status;
 }
@@ -754,6 +824,10 @@ void openai_response_free(openai_response_t *response) {
     if (response && response->content) {
         free(response->content);
         response->content = NULL;
+    }
+    if (response && response->reasoning) {
+        free(response->reasoning);
+        response->reasoning = NULL;
     }
     if (response && response->tool_calls) {
         openai_tool_calls_free(response->tool_calls,

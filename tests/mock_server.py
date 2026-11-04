@@ -48,6 +48,16 @@ Scenarios are selected by the first path segment, e.g. a request to
                  request body contains a role "tool" message an
                  aistream-style text stream is returned, otherwise an
                  ssetool-style tool call stream
+  reasoning    - 200 with the standard reply plus message-level
+                 "reasoning_content" (POST; same auth/payload checks as
+                 "ok")
+  reasoningalt - 200 with the standard reply plus message-level
+                 "reasoning" (the alternative field spelling; POST;
+                 same auth/payload checks as "ok")
+  ssereasoning - 200 text/event-stream (POST; same auth/payload checks
+                 as "ok"): reasoning_content deltas "Step one.",
+                 " Step two." followed by content deltas spelling
+                 "Hello from mock!" and [DONE]
 
 The server binds to an ephemeral port on 127.0.0.1 and prints the port
 number on stdout (flushed immediately) so the test runner can export it.
@@ -144,6 +154,53 @@ TOOL_STREAM_BODY = b"".join([
 ])
 
 
+# Non-streaming reply carrying reasoning text (reasoning_content spelling).
+REASONING_RESPONSE = {
+    "id": "chatcmpl-mock-reasoning",
+    "object": "chat.completion",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "Hello from mock!",
+                "reasoning_content": "Thinking hard... then done.",
+            },
+            "finish_reason": "stop",
+        }
+    ],
+}
+
+# Same but with the alternative "reasoning" field spelling.
+REASONING_ALT_RESPONSE = {
+    "id": "chatcmpl-mock-reasoning-alt",
+    "object": "chat.completion",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "Hello from mock!",
+                "reasoning": "Thinking hard... then done.",
+            },
+            "finish_reason": "stop",
+        }
+    ],
+}
+
+
+# Streamed reasoning: two reasoning_content deltas followed by the usual
+# content deltas spelling "Hello from mock!" and [DONE].
+REASONING_STREAM_BODY = b"".join([
+    b"data: " + _tool_chunk({"reasoning_content": "Step one."}) + b"\n\n",
+    b"data: " + _tool_chunk({"reasoning_content": " Step two."}) + b"\n\n",
+    b"data: " + _ai_chunk("Hello") + b"\n\n",
+    b"data: " + _ai_chunk(" from") + b"\n\n",
+    b"data: " + _ai_chunk(" mock!") + b"\n\n",
+    b"data: [DONE]\n\n",
+])
+
+
 def _has_tool_result(payload):
     """True when the request messages contain a role "tool" message."""
     try:
@@ -226,6 +283,15 @@ class MockHandler(BaseHTTPRequestHandler):
 
         elif scenario == "aistream":
             self._respond(200, AI_STREAM_BODY, "text/event-stream")
+
+        elif scenario == "reasoning":
+            self._respond(200, json.dumps(REASONING_RESPONSE).encode())
+
+        elif scenario == "reasoningalt":
+            self._respond(200, json.dumps(REASONING_ALT_RESPONSE).encode())
+
+        elif scenario == "ssereasoning":
+            self._respond(200, REASONING_STREAM_BODY, "text/event-stream")
 
         elif scenario == "toolcall":
             self._respond(200, json.dumps(TOOL_CALL_RESPONSE).encode())

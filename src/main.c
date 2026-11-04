@@ -287,7 +287,7 @@ static int dispatch_tool(const char *name, const char *arguments_json,
 static int g_status_cleared;
 
 /** Forward each streamed delta to the TUI (streaming reply rendering). */
-static void on_delta(const char *text, void *user_data)
+static void on_delta(const char *text, int is_reasoning, void *user_data)
 {
 	tui_t *tui = user_data;
 
@@ -297,7 +297,10 @@ static void on_delta(const char *text, void *user_data)
 		g_status_cleared = 1;
 		tui_set_status(tui, NULL);
 	}
-	tui_stream_append(tui, text);
+	if (is_reasoning)
+		tui_stream_reasoning_append(tui, text);
+	else
+		tui_stream_append(tui, text);
 }
 
 int main(void) {
@@ -430,7 +433,9 @@ int main(void) {
         /* Send the message and get the raw assistant reply; command
          * dispatch, hooks and all rendering stay here, out of agent_loop. */
         char *reply = NULL;
-        agent_msg_result_t res = agent_loop_handle_message(&loop, input, &reply);
+        char *reasoning = NULL;
+        agent_msg_result_t res = agent_loop_handle_message(&loop, input, &reply,
+                                                           &reasoning);
         tui_set_status(tui, NULL);
         if (res == AGENT_MSG_EXIT)
             break;
@@ -449,14 +454,17 @@ int main(void) {
             final_text = NULL;
         const char *text = final_text != NULL ? final_text : reply;
         /* Replace the streamed assistant message with the final reply
-         * instead of appending a second copy of the same message. */
-        tui_replace_assistant_message(tui, text);
+         * instead of appending a second copy of the same message. The
+         * reasoning is display-only: it is shown above the reply but
+         * never stored in the session history. */
+        tui_replace_assistant_message(tui, text, reasoning);
         if (session_context_add_message(&context, "assistant", text) != 0)
             tui_append_message(tui, "system",
                                "[Warning: failed to store assistant "
                                "message in history]");
         free(final_text);
         free(reply);
+        free(reasoning);
     }
 
     status = 0;

@@ -13,8 +13,11 @@ void  tui_append_message(tui_t *tui, const char *role, const char *content);
  *
  * @param tui TUI instance (must not be NULL)
  * @param content Final reply text (must not be NULL)
+ * @param reasoning Final reasoning text shown as a dim block above the
+ *                  reply (may be NULL or empty: no block is shown)
  */
-void  tui_replace_assistant_message(tui_t *tui, const char *content);
+void  tui_replace_assistant_message(tui_t *tui, const char *content,
+                                    const char *reasoning);
 /**
  * @brief Appends a streamed text delta to the assistant message.
  *
@@ -23,6 +26,14 @@ void  tui_replace_assistant_message(tui_t *tui, const char *content);
  * The screen is repainted after every call.
  */
 void  tui_stream_append(tui_t *tui, const char *text);
+/**
+ * @brief Appends a streamed reasoning delta to the assistant message.
+ *
+ * Reasoning text is rendered as a dim block above the reply content. If
+ * the last message in the history is not an assistant message, one is
+ * created with empty content. The screen is repainted after every call.
+ */
+void  tui_stream_reasoning_append(tui_t *tui, const char *text);
 void  tui_set_status(tui_t *tui, const char *status);
 /**
  * @brief Asks the user for a yes/no confirmation with an inline prompt.

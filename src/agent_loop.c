@@ -77,15 +77,18 @@ static int run_tool_call(const agent_loop_t *loop,
 }
 
 agent_msg_result_t agent_loop_handle_message(agent_loop_t *loop, char *input,
-					     char **reply)
+					     char **reply, char **reasoning)
 {
 	openai_response_t response = {0};
 	agent_msg_result_t result = AGENT_MSG_ERROR;
 	int max_rounds;
 	char *copy = NULL;
+	char *reasoning_copy = NULL;
 
 	if (reply != NULL)
 		*reply = NULL;
+	if (reasoning != NULL)
+		*reasoning = NULL;
 
 	if (loop == NULL || loop->config == NULL || loop->session == NULL ||
 	    input == NULL || reply == NULL)
@@ -140,8 +143,19 @@ agent_msg_result_t agent_loop_handle_message(agent_loop_t *loop, char *input,
 			fprintf(stderr, "agent_loop: out of memory\n");
 			goto cleanup;
 		}
+		if (reasoning != NULL && response.reasoning != NULL) {
+			reasoning_copy = util_strdup(response.reasoning);
+			if (reasoning_copy == NULL) {
+				fprintf(stderr, "agent_loop: out of memory\n");
+				goto cleanup;
+			}
+		}
 		*reply = copy;
 		copy = NULL; /* ownership transferred to *reply */
+		if (reasoning != NULL) {
+			*reasoning = reasoning_copy;
+			reasoning_copy = NULL; /* transferred to *reasoning */
+		}
 		result = AGENT_MSG_OK;
 		goto cleanup;
 	}
@@ -158,6 +172,7 @@ agent_msg_result_t agent_loop_handle_message(agent_loop_t *loop, char *input,
 cleanup:
 	openai_response_free(&response);
 	free(copy);
+	free(reasoning_copy);
 	free(input);
 	return result;
 }

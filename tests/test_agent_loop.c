@@ -27,13 +27,25 @@ static struct delta_collector {
 	char buf[256];
 	size_t len;
 	size_t count;
+	char reasoning_buf[256];
+	size_t reasoning_len;
+	size_t reasoning_count;
 } g_deltas;
 
-static void delta_collect(const char *text, void *user_data)
+static void delta_collect(const char *text, int is_reasoning, void *user_data)
 {
 	struct delta_collector *col = user_data;
 	size_t n = strlen(text);
 
+	if (is_reasoning) {
+		if (col->reasoning_len + n < sizeof(col->reasoning_buf)) {
+			memcpy(col->reasoning_buf + col->reasoning_len, text, n);
+			col->reasoning_len += n;
+			col->reasoning_buf[col->reasoning_len] = '\0';
+			col->reasoning_count++;
+		}
+		return;
+	}
 	if (col->len + n < sizeof(col->buf)) {
 		memcpy(col->buf + col->len, text, n);
 		col->len += n;
@@ -107,9 +119,10 @@ static void test_null_loop(void)
 {
 	char *input = dup_str("Hello");
 	char *reply = NULL;
+	char *reasoning = NULL;
 
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(NULL, input,
-							      &reply),
+							      &reply, &reasoning),
 			  (long long)AGENT_MSG_ERROR);
 	TEST_CHECK_NULL(reply);
 
@@ -124,6 +137,7 @@ static void test_null_input(void)
 	openai_config_t cfg;
 	agent_loop_t loop;
 	char *reply = (char *)"sentinel";
+	char *reasoning = NULL;
 
 	if (session_context_init(&ctx, 10) != 0)
 		return;
@@ -134,7 +148,7 @@ static void test_null_input(void)
 	loop.on_delta = NULL;
 	loop.delta_user_data = NULL;
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, NULL,
-							       &reply),
+							       &reply, &reasoning),
 			  (long long)AGENT_MSG_ERROR);
 	TEST_CHECK_NULL(reply);
 	TEST_CHECK_INT_EQ((long long)ctx.count, 0);
@@ -158,7 +172,7 @@ static void test_null_reply_out(void)
 	loop.on_delta = NULL;
 	loop.delta_user_data = NULL;
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
-							       NULL),
+							       NULL, NULL),
 			  (long long)AGENT_MSG_ERROR);
 	TEST_CHECK_INT_EQ((long long)ctx.count, 0);
 	session_context_free(&ctx);
@@ -170,6 +184,7 @@ static void test_null_config(void)
 	session_context_t ctx;
 	agent_loop_t loop;
 	char *reply = NULL;
+	char *reasoning = NULL;
 
 	if (session_context_init(&ctx, 10) != 0) {
 		free(input);
@@ -182,7 +197,7 @@ static void test_null_config(void)
 	loop.on_delta = NULL;
 	loop.delta_user_data = NULL;
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
-							       &reply),
+							       &reply, &reasoning),
 			  (long long)AGENT_MSG_ERROR);
 	TEST_CHECK_NULL(reply);
 	TEST_CHECK_INT_EQ((long long)ctx.count, 0);
@@ -197,6 +212,7 @@ static void test_full_turn_success(void)
 	openai_config_t cfg;
 	agent_loop_t loop;
 	char *reply = NULL;
+	char *reasoning = NULL;
 
 	if (build_url(base, sizeof(base), "ok") != 0)
 		return;
@@ -206,7 +222,7 @@ static void test_full_turn_success(void)
 	char *input = dup_str("Hello");
 	TEST_CHECK_NOT_NULL(input);
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
-							       &reply),
+							       &reply, &reasoning),
 			  (long long)AGENT_MSG_OK);
 	TEST_CHECK_STR_EQ(reply, "Hello from mock!");
 
@@ -217,6 +233,7 @@ static void test_full_turn_success(void)
 	TEST_CHECK_STR_EQ(ctx.messages[0].content, "Hello");
 
 	free(reply);
+	free(reasoning);
 	session_context_free(&ctx);
 }
 
@@ -227,6 +244,7 @@ static void test_full_turn_streaming(void)
 	openai_config_t cfg;
 	agent_loop_t loop;
 	char *reply = NULL;
+	char *reasoning = NULL;
 
 	if (build_url(base, sizeof(base), "aistream") != 0)
 		return;
@@ -240,7 +258,7 @@ static void test_full_turn_streaming(void)
 	TEST_CHECK_NOT_NULL(input);
 	memset(&g_deltas, 0, sizeof(g_deltas));
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
-							       &reply),
+							       &reply, &reasoning),
 			  (long long)AGENT_MSG_OK);
 	/* The streamed deltas must arrive in order and the reply must hold
 	 * the full text, ready for the caller's post_message hook. */
@@ -250,6 +268,7 @@ static void test_full_turn_streaming(void)
 	TEST_CHECK_INT_EQ((long long)ctx.count, 1);
 
 	free(reply);
+	free(reasoning);
 	session_context_free(&ctx);
 }
 
@@ -260,6 +279,7 @@ static void test_full_turn_streaming_no_callback(void)
 	openai_config_t cfg;
 	agent_loop_t loop;
 	char *reply = NULL;
+	char *reasoning = NULL;
 
 	if (build_url(base, sizeof(base), "aistream") != 0)
 		return;
@@ -271,12 +291,77 @@ static void test_full_turn_streaming_no_callback(void)
 	char *input = dup_str("Hello");
 	TEST_CHECK_NOT_NULL(input);
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
-							       &reply),
+							       &reply, &reasoning),
 			  (long long)AGENT_MSG_OK);
 	TEST_CHECK_STR_EQ(reply, "Hello from mock!");
 	TEST_CHECK_INT_EQ((long long)ctx.count, 1);
 
 	free(reply);
+	free(reasoning);
+	session_context_free(&ctx);
+}
+
+static void test_full_turn_reasoning(void)
+{
+	char base[128];
+	session_context_t ctx;
+	openai_config_t cfg;
+	agent_loop_t loop;
+	char *reply = NULL;
+	char *reasoning = NULL;
+
+	if (build_url(base, sizeof(base), "reasoning") != 0)
+		return;
+	if (make_loop(&loop, &ctx, &cfg, base) != 0)
+		return;
+
+	char *input = dup_str("Hello");
+	TEST_CHECK_NOT_NULL(input);
+	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
+						       &reply, &reasoning),
+			  (long long)AGENT_MSG_OK);
+	TEST_CHECK_STR_EQ(reply, "Hello from mock!");
+	TEST_CHECK_STR_EQ(reasoning, "Thinking hard... then done.");
+
+	/* The reasoning is display-only: it must never enter the history. */
+	TEST_CHECK_INT_EQ((long long)ctx.count, 1);
+	TEST_CHECK_STR_EQ(ctx.messages[0].role, "user");
+
+	free(reply);
+	free(reasoning);
+	session_context_free(&ctx);
+}
+
+static void test_full_turn_reasoning_streaming(void)
+{
+	char base[128];
+	session_context_t ctx;
+	openai_config_t cfg;
+	agent_loop_t loop;
+	char *reply = NULL;
+	char *reasoning = NULL;
+
+	if (build_url(base, sizeof(base), "ssereasoning") != 0)
+		return;
+	if (make_loop(&loop, &ctx, &cfg, base) != 0)
+		return;
+	cfg.stream = 1;
+	loop.on_delta = delta_collect;
+	loop.delta_user_data = &g_deltas;
+
+	char *input = dup_str("Hello");
+	TEST_CHECK_NOT_NULL(input);
+	memset(&g_deltas, 0, sizeof(g_deltas));
+	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
+						       &reply, &reasoning),
+			  (long long)AGENT_MSG_OK);
+	TEST_CHECK_STR_EQ(reply, "Hello from mock!");
+	TEST_CHECK_STR_EQ(reasoning, "Step one. Step two.");
+	TEST_CHECK_STR_EQ(g_deltas.reasoning_buf, "Step one. Step two.");
+	TEST_CHECK_INT_EQ((long long)g_deltas.reasoning_count, 2);
+
+	free(reply);
+	free(reasoning);
 	session_context_free(&ctx);
 }
 
@@ -286,6 +371,7 @@ static void test_unreachable_server(void)
 	openai_config_t cfg;
 	agent_loop_t loop;
 	char *reply = NULL;
+	char *reasoning = NULL;
 
 	if (make_loop(&loop, &ctx, &cfg, "http://127.0.0.1:1/ok") != 0)
 		return;
@@ -293,7 +379,7 @@ static void test_unreachable_server(void)
 	char *input = dup_str("Hello");
 	TEST_CHECK_NOT_NULL(input);
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
-							       &reply),
+							       &reply, &reasoning),
 			  (long long)AGENT_MSG_ERROR);
 	TEST_CHECK_NULL(reply);
 
@@ -344,6 +430,7 @@ static void test_tool_round_success(void)
 	openai_config_t cfg;
 	agent_loop_t loop;
 	char *reply = NULL;
+	char *reasoning = NULL;
 
 	if (build_url(base, sizeof(base), "toolround") != 0)
 		return;
@@ -357,7 +444,7 @@ static void test_tool_round_success(void)
 	char *input = dup_str("read /tmp/emma-test.txt");
 	TEST_CHECK_NOT_NULL(input);
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
-							       &reply),
+							       &reply, &reasoning),
 			  (long long)AGENT_MSG_OK);
 	TEST_CHECK_STR_EQ(reply, "Hello from mock!");
 
@@ -376,6 +463,7 @@ static void test_tool_round_success(void)
 	TEST_CHECK_STR_EQ(ctx.messages[2].content, "file body");
 
 	free(reply);
+	free(reasoning);
 	session_context_free(&ctx);
 }
 
@@ -386,6 +474,7 @@ static void test_tool_round_streaming(void)
 	openai_config_t cfg;
 	agent_loop_t loop;
 	char *reply = NULL;
+	char *reasoning = NULL;
 
 	if (build_url(base, sizeof(base), "ssetoolround") != 0)
 		return;
@@ -403,13 +492,14 @@ static void test_tool_round_streaming(void)
 	TEST_CHECK_NOT_NULL(input);
 	memset(&g_deltas, 0, sizeof(g_deltas));
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
-							       &reply),
+							       &reply, &reasoning),
 			  (long long)AGENT_MSG_OK);
 	TEST_CHECK_STR_EQ(reply, "Hello from mock!");
 	TEST_CHECK_INT_EQ((long long)g_dispatch.count, 1);
 	TEST_CHECK_STR_EQ(g_dispatch.args[0], "{\"path\":\"/tmp/x\"}");
 
 	free(reply);
+	free(reasoning);
 	session_context_free(&ctx);
 }
 
@@ -420,6 +510,7 @@ static void test_tool_calls_without_dispatcher(void)
 	openai_config_t cfg;
 	agent_loop_t loop;
 	char *reply = NULL;
+	char *reasoning = NULL;
 
 	if (build_url(base, sizeof(base), "toolcall") != 0)
 		return;
@@ -430,12 +521,13 @@ static void test_tool_calls_without_dispatcher(void)
 	char *input = dup_str("Hello");
 	TEST_CHECK_NOT_NULL(input);
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
-							       &reply),
+							       &reply, &reasoning),
 			  (long long)AGENT_MSG_OK);
 	TEST_CHECK_STR_EQ(reply, "");
 	TEST_CHECK_INT_EQ((long long)ctx.count, 1); /* only the user msg */
 
 	free(reply);
+	free(reasoning);
 	session_context_free(&ctx);
 }
 
@@ -446,6 +538,7 @@ static void test_tool_round_limit(void)
 	openai_config_t cfg;
 	agent_loop_t loop;
 	char *reply = NULL;
+	char *reasoning = NULL;
 
 	if (build_url(base, sizeof(base), "toolloop") != 0)
 		return;
@@ -460,13 +553,14 @@ static void test_tool_round_limit(void)
 	char *input = dup_str("loop forever");
 	TEST_CHECK_NOT_NULL(input);
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
-							       &reply),
+							       &reply, &reasoning),
 			  (long long)AGENT_MSG_OK);
 	TEST_CHECK_STR_EQ(reply, "[Error: tool round limit reached]");
 	/* max_tool_rounds + 1 requests were made, each dispatching one call. */
 	TEST_CHECK_INT_EQ((long long)g_dispatch.count, 3);
 
 	free(reply);
+	free(reasoning);
 	session_context_free(&ctx);
 }
 
@@ -477,6 +571,7 @@ static void test_tool_session_full_exits(void)
 	openai_config_t cfg;
 	agent_loop_t loop;
 	char *reply = NULL;
+	char *reasoning = NULL;
 
 	if (build_url(base, sizeof(base), "toolround") != 0)
 		return;
@@ -503,10 +598,11 @@ static void test_tool_session_full_exits(void)
 	char *input = dup_str("next");
 	TEST_CHECK_NOT_NULL(input);
 	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
-							       &reply),
+							       &reply, &reasoning),
 			  (long long)AGENT_MSG_OK);
 	TEST_CHECK_NOT_NULL(reply);
 	free(reply);
+	free(reasoning);
 	session_context_free(&ctx);
 }
 
@@ -521,6 +617,8 @@ int main(void)
 	TEST_RUN(test_full_turn_success);
 	TEST_RUN(test_full_turn_streaming);
 	TEST_RUN(test_full_turn_streaming_no_callback);
+	TEST_RUN(test_full_turn_reasoning);
+	TEST_RUN(test_full_turn_reasoning_streaming);
 	TEST_RUN(test_unreachable_server);
 	TEST_RUN(test_tool_round_success);
 	TEST_RUN(test_tool_round_streaming);

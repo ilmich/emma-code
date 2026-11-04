@@ -37,8 +37,11 @@ static void test_api_null_args_safe(void)
 	tui_set_status(NULL, NULL);
 	tui_stream_append(NULL, NULL);
 	tui_stream_append(NULL, "delta");
-	tui_replace_assistant_message(NULL, NULL);
-	tui_replace_assistant_message(NULL, "content");
+	tui_stream_reasoning_append(NULL, NULL);
+	tui_stream_reasoning_append(NULL, "reasoning delta");
+	tui_replace_assistant_message(NULL, NULL, NULL);
+	tui_replace_assistant_message(NULL, "content", NULL);
+	tui_replace_assistant_message(NULL, "content", "reasoning");
 
 	/* tui_confirm denies on NULL arguments without crashing. */
 	TEST_CHECK_INT_EQ((long long)tui_confirm(NULL, "proceed?"), 0);

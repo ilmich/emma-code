@@ -52,18 +52,36 @@ static openai_config_t make_config(const char *base_url)
 }
 
 /* Delta collector for openai_chat_completion_stream tests, passed through
- * user_data. Records every delta in order plus a call count. */
+ * user_data. Records content and reasoning deltas in separate buffers plus
+ * per-kind call counts. */
 static struct delta_collector {
 	char buf[256];
 	size_t len;
 	size_t count;
+	char reasoning_buf[256];
+	size_t reasoning_len;
+	size_t reasoning_count;
 } g_deltas;
 
-static void delta_collect(const char *text, void *user_data)
+static void delta_collect(const char *text, int is_reasoning, void *user_data)
 {
 	struct delta_collector *col = user_data;
 	size_t n = strlen(text);
 
+	if (is_reasoning) {
+		if (col->reasoning_len + n < sizeof(col->reasoning_buf)) {
+			memcpy(col->reasoning_buf + col->reasoning_len, text, n);
+			col->reasoning_len += n;
+			col->reasoning_buf[col->reasoning_len] = '\0';
+			col->reasoning_count++;
+		} else {
+			test__failures++; /* collector overflow: report as failure */
+			fprintf(stderr,
+				"  FAIL %s:%d: reasoning collector overflow\n",
+				__FILE__, __LINE__);
+		}
+		return;
+	}
 	if (col->len + n < sizeof(col->buf)) {
 		memcpy(col->buf + col->len, text, n);
 		col->len += n;
@@ -586,6 +604,100 @@ static void test_tool_messages_serialized(void)
 	openai_response_free(&resp);
 }
 
+static void test_chat_completion_reasoning(void)
+{
+	char base[128];
+	openai_config_t cfg;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
+
+	if (build_url(base, sizeof(base), "reasoning") != 0) {
+		return;
+	}
+	cfg = make_config(base);
+	msgs[0] = make_user_message();
+
+	/* message.reasoning_content must land in resp.reasoning. */
+	TEST_CHECK_INT_EQ(openai_chat_completion(&cfg, msgs, 1, &resp), 0);
+	TEST_CHECK_STR_EQ(resp.content, "Hello from mock!");
+	TEST_CHECK_STR_EQ(resp.reasoning, "Thinking hard... then done.");
+	openai_response_free(&resp);
+	TEST_CHECK_NULL(resp.reasoning);
+}
+
+static void test_chat_completion_reasoning_alt_field(void)
+{
+	char base[128];
+	openai_config_t cfg;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
+
+	if (build_url(base, sizeof(base), "reasoningalt") != 0) {
+		return;
+	}
+	cfg = make_config(base);
+	msgs[0] = make_user_message();
+
+	/* The alternative "reasoning" spelling must be parsed too. */
+	TEST_CHECK_INT_EQ(openai_chat_completion(&cfg, msgs, 1, &resp), 0);
+	TEST_CHECK_STR_EQ(resp.content, "Hello from mock!");
+	TEST_CHECK_STR_EQ(resp.reasoning, "Thinking hard... then done.");
+	openai_response_free(&resp);
+	TEST_CHECK_NULL(resp.reasoning);
+}
+
+static void test_stream_reasoning(void)
+{
+	char base[128];
+	openai_config_t cfg;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
+
+	if (build_url(base, sizeof(base), "ssereasoning") != 0) {
+		return;
+	}
+	cfg = make_config(base);
+	cfg.stream = 1;
+	msgs[0] = make_user_message();
+	memset(&g_deltas, 0, sizeof(g_deltas));
+
+	TEST_CHECK_INT_EQ(openai_chat_completion_stream(&cfg, msgs, 1,
+						delta_collect,
+						&g_deltas, &resp), 0);
+	/* Reasoning deltas must be accumulated separately from content. */
+	TEST_CHECK_STR_EQ(resp.content, "Hello from mock!");
+	TEST_CHECK_STR_EQ(resp.reasoning, "Step one. Step two.");
+	TEST_CHECK_STR_EQ(g_deltas.buf, "Hello from mock!");
+	TEST_CHECK_STR_EQ(g_deltas.reasoning_buf, "Step one. Step two.");
+	TEST_CHECK_INT_EQ((long long)g_deltas.count, 3);
+	TEST_CHECK_INT_EQ((long long)g_deltas.reasoning_count, 2);
+
+	openai_response_free(&resp);
+	TEST_CHECK_NULL(resp.reasoning);
+}
+
+static void test_stream_no_reasoning_field(void)
+{
+	char base[128];
+	openai_config_t cfg;
+	openai_message_t msgs[1] = {0};
+	openai_response_t resp = {0};
+
+	if (build_url(base, sizeof(base), "aistream") != 0) {
+		return;
+	}
+	cfg = make_config(base);
+	cfg.stream = 1;
+	msgs[0] = make_user_message();
+
+	/* A stream without reasoning deltas must leave reasoning NULL. */
+	TEST_CHECK_INT_EQ(openai_chat_completion_stream(&cfg, msgs, 1, NULL,
+						NULL, &resp), 0);
+	TEST_CHECK_STR_EQ(resp.content, "Hello from mock!");
+	TEST_CHECK_NULL(resp.reasoning);
+	openai_response_free(&resp);
+}
+
 static void test_message_free_null_safe(void)
 {
 	openai_message_t msg = {0};
@@ -633,9 +745,13 @@ int main(void)
 	TEST_RUN(test_tools_json_sent);
 	TEST_RUN(test_tool_messages_serialized);
 	TEST_RUN(test_message_free_null_safe);
+	TEST_RUN(test_chat_completion_reasoning);
+	TEST_RUN(test_chat_completion_reasoning_alt_field);
 
 	TEST_RUN(test_stream_success);
 	TEST_RUN(test_stream_no_callback);
+	TEST_RUN(test_stream_reasoning);
+	TEST_RUN(test_stream_no_reasoning_field);
 	TEST_RUN(test_stream_fallback_non_sse);
 	TEST_RUN(test_stream_server_error_500);
 	TEST_RUN(test_stream_unreachable_server);

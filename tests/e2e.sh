@@ -77,6 +77,30 @@ if command -v curl >/dev/null 2>&1; then
     esac
 fi
 
+# 4. Reasoning: the non-streaming reasoning scenario must carry
+#    message.reasoning_content and the streaming one reasoning deltas.
+if command -v curl >/dev/null 2>&1; then
+    body=$(curl -s "http://127.0.0.1:${PORT}/reasoning/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer test-key-123" \
+        -d '{"model":"test-model","messages":[{"role":"user","content":"Hi"}]}')
+    case "$body" in
+        *"reasoning_content"*"Thinking hard"*) : ;;
+        *) echo "FAIL e2e: reasoning scenario lacks reasoning_content" >&2
+           status=1 ;;
+    esac
+
+    body=$(curl -s "http://127.0.0.1:${PORT}/ssereasoning/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer test-key-123" \
+        -d '{"model":"test-model","messages":[{"role":"user","content":"Hi"}],"stream":true}')
+    case "$body" in
+        *"reasoning_content"*"Step one."*"Hello"*"data: [DONE]") : ;;
+        *) echo "FAIL e2e: unexpected ssereasoning body from mock server" >&2
+           status=1 ;;
+    esac
+fi
+
 if [ "$status" -eq 0 ]; then
     echo "e2e: OK"
 fi

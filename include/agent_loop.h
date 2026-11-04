@@ -74,9 +74,12 @@ typedef struct agent_loop {
  * @param input User message, owned by and freed by this function.
  * @param reply Receives the malloc'ed assistant reply on AGENT_MSG_OK,
  *              NULL otherwise.
+ * @param reasoning Receives the malloc'ed reasoning text of the final
+ *              reply (or NULL when the model sent none) on AGENT_MSG_OK;
+ *              NULL always when @p reasoning is NULL. Owned by the caller.
  * @return AGENT_MSG_OK, AGENT_MSG_ERROR or AGENT_MSG_EXIT.
  */
 agent_msg_result_t agent_loop_handle_message(agent_loop_t *loop, char *input,
-					     char **reply);
+					     char **reply, char **reasoning);
 
 #endif /* AGENT_LOOP_H */

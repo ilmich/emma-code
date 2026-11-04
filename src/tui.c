@@ -27,6 +27,7 @@ extern int close(int fd);
 #define OUT_BUF_SIZE       8192
 
 #define ANSI_RESET         "\033[0m"
+#define ANSI_DIM           "\033[0;2m"
 #define ANSI_BOLD_GREEN    "\033[1;32m"
 #define ANSI_BOLD_BLUE     "\033[1;34m"
 #define ANSI_BOLD_YELLOW   "\033[1;33m"
@@ -39,6 +40,7 @@ extern int close(int fd);
 typedef struct {
     char *role;
     char *content;
+    char *reasoning;
 } tui_message_t;
 
 struct tui_t {
@@ -187,6 +189,95 @@ static void write_str(const char *s) {
     out_write(s, strlen(s));
 }
 
+// Word-wraps plain reasoning text into dim-styled lines owned by the
+// caller (free with md_lines_free()). Returns NULL when there is nothing
+// to render. Newlines force a line break; words longer than the width
+// are hard-broken at the wrapping width.
+static md_line_t *reasoning_text_lines(const char *text, int width,
+                                       size_t *out_count) {
+    const size_t dim_len = sizeof(ANSI_DIM) - 1;
+    const size_t reset_len = sizeof(ANSI_RESET) - 1;
+    size_t cap = 8;
+    size_t count = 0;
+    md_line_t *lines = NULL;
+    size_t i = 0;
+    size_t text_len;
+
+    if (out_count) *out_count = 0;
+    if (text == NULL || text[0] == '\0' || width < 1) return NULL;
+    text_len = strlen(text);
+
+    lines = malloc(cap * sizeof(md_line_t));
+    if (!lines) return NULL;
+
+    while (i < text_len) {
+        size_t take = 0;
+        size_t last_space = 0;
+        int has_space = 0;
+        int forced_break = 0;
+        size_t start, seg_len;
+        char *row;
+
+        if (count >= cap) {
+            md_line_t *tmp;
+            cap *= 2;
+            tmp = realloc(lines, cap * sizeof(md_line_t));
+            if (!tmp) {
+                md_lines_free(lines, count);
+                return NULL;
+            }
+            lines = tmp;
+        }
+
+        /* Greedy wrap: take up to width chars, prefer breaking at the
+         * last space inside the segment; a newline forces the break. */
+        while (i + take < text_len && (int)take < width) {
+            char c = text[i + take];
+            if (c == '\n') {
+                forced_break = 1;
+                break;
+            }
+            if (c == ' ') {
+                last_space = take;
+                has_space = 1;
+            }
+            take++;
+        }
+        if (!forced_break && i + take < text_len && has_space &&
+            last_space > 0) {
+            take = last_space; /* break at the last space */
+        }
+
+        start = i;
+        seg_len = take;
+        if (seg_len > 0 && text[start] == ' ') {
+            start++; /* drop the space carried over from the wrap */
+            seg_len--;
+        }
+
+        row = malloc(dim_len + seg_len + reset_len + 1);
+        if (!row) {
+            md_lines_free(lines, count);
+            return NULL;
+        }
+        memcpy(row, ANSI_DIM, dim_len);
+        memcpy(row + dim_len, text + start, seg_len);
+        memcpy(row + dim_len + seg_len, ANSI_RESET, reset_len + 1);
+        lines[count].text = row;
+        count++;
+
+        if (forced_break) {
+            i += take + 1; /* consume the newline too */
+        } else {
+            i += take;
+            while (i < text_len && text[i] == ' ') i++; /* wrap spaces */
+        }
+    }
+
+    if (out_count) *out_count = count;
+    return lines;
+}
+
 // Number of pre-wrapped markdown lines a message renders to. Empty or
 // NULL content still occupies one (label) row.
 static int count_lines_for_content(const char *content, int width) {
@@ -194,6 +285,19 @@ static int count_lines_for_content(const char *content, int width) {
     md_line_t *lines = md_render(content, width, &count);
     md_lines_free(lines, count);
     return (count > 0) ? (int)count : 1;
+}
+
+// Number of rows the reasoning block of a message renders to: one dim
+// label row plus the wrapped dim reasoning text. Zero when the message
+// carries no reasoning.
+static int count_lines_for_reasoning(const char *reasoning, int width) {
+    size_t count = 0;
+    md_line_t *lines;
+
+    if (reasoning == NULL || reasoning[0] == '\0') return 0;
+    lines = reasoning_text_lines(reasoning, width, &count);
+    md_lines_free(lines, count);
+    return (int)count + 1; /* + label row */
 }
 
 static int count_input_lines(tui_t *tui) {
@@ -250,6 +354,8 @@ static int total_rendered_lines(tui_t *tui) {
     int content_width = tui->term_cols - role_prefix;
     if (content_width < 1) content_width = 1;
     for (size_t i = 0; i < tui->msg_count; i++) {
+        total += count_lines_for_reasoning(tui->messages[i].reasoning,
+                                           content_width);
         total += count_lines_for_content(tui->messages[i].content, content_width);
     }
     return total;
@@ -272,10 +378,21 @@ static void render_history(tui_t *tui) {
     for (size_t i = 0; i < tui->msg_count && screen_row <= history_rows; i++) {
         const char *role    = tui->messages[i].role;
         const char *content = tui->messages[i].content;
-        int msg_lines = count_lines_for_content(content, content_width);
+        const char *reasoning = tui->messages[i].reasoning;
+
+        // Reasoning block: one dim label row plus the wrapped dim text.
+        size_t r_count = 0;
+        md_line_t *r_lines = reasoning_text_lines(reasoning, content_width,
+                                                  &r_count);
+        int r_rows = (r_count > 0) ? (int)r_count + 1 : 0;
+
+        size_t md_count = 0;
+        int msg_lines = r_rows +
+            count_lines_for_content(content, content_width);
 
         if (lines_to_skip >= msg_lines) {
             lines_to_skip -= msg_lines;
+            md_lines_free(r_lines, r_count);
             continue;
         }
 
@@ -289,12 +406,11 @@ static void render_history(tui_t *tui) {
             label = "  System";
         }
 
-        // Render the message into pre-wrapped, styled markdown lines.
-        // An empty message still shows its label on one row.
-        size_t md_count = 0;
+        // Render the message content into pre-wrapped, styled markdown
+        // lines. An empty message still shows its label on one row.
         md_line_t *lines = md_render(content, content_width, &md_count);
 
-        int line_in_msg = lines_to_skip; // first visible markdown line
+        int line_in_msg = lines_to_skip; // first visible message line
         lines_to_skip = 0;               // consumed by this message
 
         cursor_move(screen_row, 1);
@@ -307,9 +423,9 @@ static void render_history(tui_t *tui) {
         write_str(": ");
         write_str(ANSI_RESET);
 
-        for (size_t li = (size_t)line_in_msg;
-             li < md_count && screen_row <= history_rows; li++) {
-            if (li > (size_t)line_in_msg) {
+        for (int li = line_in_msg;
+             li < msg_lines && screen_row <= history_rows; li++) {
+            if (li > line_in_msg) {
                 // Erase stale characters from a previous frame on this row.
                 write_str(ANSI_CLEAR_LINE);
                 screen_row++;
@@ -318,8 +434,19 @@ static void render_history(tui_t *tui) {
                     write_str(ANSI_CLEAR_LINE);
                 }
             }
-            if (lines[li].text) {
-                write_str(lines[li].text);
+            if (li < r_rows) {
+                // Reasoning block: first row is the dim label, the rest
+                // are the pre-styled dim reasoning lines.
+                if (li == 0) {
+                    write_str(ANSI_DIM);
+                    write_str("reasoning");
+                    write_str(ANSI_RESET);
+                } else if (r_lines[li - 1].text) {
+                    write_str(r_lines[li - 1].text);
+                }
+            } else if ((size_t)(li - r_rows) < md_count &&
+                       lines[li - r_rows].text) {
+                write_str(lines[li - r_rows].text);
             }
         }
 
@@ -327,6 +454,7 @@ static void render_history(tui_t *tui) {
         write_str(ANSI_CLEAR_LINE);
 
         screen_row++;
+        md_lines_free(r_lines, r_count);
         md_lines_free(lines, md_count);
     }
 
@@ -553,6 +681,7 @@ void tui_free(tui_t *tui) {
     for (size_t i = 0; i < tui->msg_count; i++) {
         free(tui->messages[i].role);
         free(tui->messages[i].content);
+        free(tui->messages[i].reasoning);
     }
     free(tui->messages);
     free(tui->input_buf);
@@ -618,7 +747,38 @@ void tui_append_message(tui_t *tui, const char *role, const char *content) {
 
     tui->messages[tui->msg_count].role    = r;
     tui->messages[tui->msg_count].content = c;
+    tui->messages[tui->msg_count].reasoning = NULL;
     tui->msg_count++;
+
+    tui_after_history_change(tui);
+}
+
+void tui_stream_reasoning_append(tui_t *tui, const char *text) {
+    if (!tui || !text || !*text) return;
+
+    if (tui->msg_count == 0 || tui->messages[tui->msg_count - 1].role == NULL ||
+        strcmp(tui->messages[tui->msg_count - 1].role, "assistant") != 0) {
+        // No assistant message yet: the first reasoning delta starts one
+        // (content stays empty until the first content delta arrives).
+        tui_append_message(tui, "assistant", "");
+        if (tui->msg_count == 0 ||
+            strcmp(tui->messages[tui->msg_count - 1].role, "assistant") != 0) {
+            return; // append failed (allocation error already reported)
+        }
+    }
+
+    {
+        tui_message_t *m = &tui->messages[tui->msg_count - 1];
+        size_t rlen = m->reasoning ? strlen(m->reasoning) : 0;
+        size_t tlen = strlen(text);
+        char *tmp = realloc(m->reasoning, rlen + tlen + 1);
+        if (!tmp) {
+            fprintf(stderr, "tui_stream_reasoning_append: realloc failed\n");
+            return;
+        }
+        m->reasoning = tmp;
+        memcpy(m->reasoning + rlen, text, tlen + 1);
+    }
 
     tui_after_history_change(tui);
 }
@@ -648,7 +808,8 @@ void tui_stream_append(tui_t *tui, const char *text) {
     tui_after_history_change(tui);
 }
 
-void tui_replace_assistant_message(tui_t *tui, const char *content) {
+void tui_replace_assistant_message(tui_t *tui, const char *content,
+                                   const char *reasoning) {
     if (!tui || !content) return;
 
     if (tui->msg_count > 0 && tui->messages[tui->msg_count - 1].role != NULL &&
@@ -657,18 +818,40 @@ void tui_replace_assistant_message(tui_t *tui, const char *content) {
         // have already created, so the text is not shown twice.
         tui_message_t *m = &tui->messages[tui->msg_count - 1];
         char *c = strdup(content);
+        char *r = NULL;
         if (c == NULL) {
             fprintf(stderr, "tui_replace_assistant_message: strdup failed\n");
             return;
         }
+        if (reasoning != NULL && reasoning[0] != '\0') {
+            r = strdup(reasoning);
+            if (r == NULL) {
+                fprintf(stderr,
+                        "tui_replace_assistant_message: strdup failed\n");
+                free(c);
+                return;
+            }
+        }
         free(m->content);
         m->content = c;
+        free(m->reasoning);
+        m->reasoning = r;
         tui_after_history_change(tui);
         return;
     }
 
     // No streamed assistant message in progress: append normally.
     tui_append_message(tui, "assistant", content);
+    if (tui->msg_count > 0 &&
+        tui->messages[tui->msg_count - 1].role != NULL &&
+        strcmp(tui->messages[tui->msg_count - 1].role, "assistant") == 0 &&
+        reasoning != NULL && reasoning[0] != '\0') {
+        tui_message_t *m = &tui->messages[tui->msg_count - 1];
+        m->reasoning = strdup(reasoning);
+        if (m->reasoning == NULL) {
+            fprintf(stderr, "tui_replace_assistant_message: strdup failed\n");
+        }
+    }
 }
 
 void tui_set_status(tui_t *tui, const char *status) {
