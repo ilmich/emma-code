@@ -101,6 +101,12 @@ static void test_show_banner_null_safe(void)
 	tui_show_banner(NULL);
 }
 
+static void test_clear_null_safe(void)
+{
+	/* Must not crash. */
+	tui_clear(NULL);
+}
+
 static void test_free_null_safe(void)
 {
 	/* NULL and double free must not crash. */
@@ -289,6 +295,7 @@ int main(void)
 	TEST_RUN(test_banner_lines);
 	TEST_RUN(test_banner_lines_null_count_and_copies);
 	TEST_RUN(test_show_banner_null_safe);
+	TEST_RUN(test_clear_null_safe);
 
 	if (test__failures == 0)
 		printf("All tui tests passed\n");

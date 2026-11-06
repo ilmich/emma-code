@@ -34,6 +34,19 @@ int session_context_init(session_context_t *context, size_t max_messages);
 void session_context_free(session_context_t *context);
 
 /**
+ * @brief Resets the session: frees the content of every stored message
+ *        and, if system_prompt is not NULL, re-seeds the context with it
+ *        as the first (role "system") message. The message array capacity
+ *        and max_messages are preserved, so the truncation policy keeps
+ *        working unchanged after the reset.
+ * @param context Pointer to the context structure to reset.
+ * @param system_prompt Optional system prompt to re-seed (may be NULL).
+ * @return 0 on success, -1 if context is NULL or the re-seed fails. On
+ *         -1 the history is cleared but the system prompt may be missing.
+ */
+int session_context_reset(session_context_t *context, const char *system_prompt);
+
+/**
  * @brief Adds a new message to the session context. Handles dynamic resizing and truncation.
  * @param context Pointer to the session context.
  * @param role The role of the message ("user", "assistant", "system").

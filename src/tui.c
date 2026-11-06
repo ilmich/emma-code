@@ -29,6 +29,8 @@ extern int close(int fd);
 #define OUT_BUF_SIZE       8192
 
 #define ANSI_RESET         "\033[0m"
+#define ANSI_CURSOR_HOME   "\033[H"
+#define ANSI_CLEAR_SCREEN  "\033[2J"
 #define ANSI_CLEAR_LINE    "\033[K"
 #define ANSI_CLEAR_END     "\033[J"
 #define ANSI_HIDE_CURSOR   "\033[?25l"
@@ -855,13 +857,12 @@ cleanup:
     return NULL;
 }
 
-void tui_show_banner(tui_t *tui) {
+// Erases the live area and prints the startup banner followed by one
+// blank line, then repaints the live area. Shared by tui_show_banner()
+// and tui_clear().
+static void print_banner(tui_t *tui) {
     size_t count = 0;
     char **lines = NULL;
-
-    if (!tui) return;
-
-    if (tui->streaming_active) stream_sync(tui, 1);
 
     erase_live_area(tui);
 
@@ -881,6 +882,40 @@ void tui_show_banner(tui_t *tui) {
     write_str("\r\n"); /* blank line between banner and transcript */
     draw_live_area(tui, NULL);
     out_flush();
+}
+
+void tui_show_banner(tui_t *tui) {
+    if (!tui) return;
+
+    if (tui->streaming_active) stream_sync(tui, 1);
+
+    print_banner(tui);
+}
+
+void tui_clear(tui_t *tui) {
+    if (!tui) return;
+
+    if (tui->streaming_active) stream_sync(tui, 1);
+
+    erase_live_area(tui);
+
+    /* Drop every stored message: the transcript restarts from scratch. */
+    for (size_t i = 0; i < tui->msg_count; i++) {
+        free(tui->messages[i].role);
+        free(tui->messages[i].content);
+        free(tui->messages[i].reasoning);
+    }
+    tui->msg_count = 0;
+    tui->streaming_active = 0;
+    tui->printed_lines = 0;
+    tui->cursor_row = 0;
+
+    /* Clear the visible screen and move the cursor home; the terminal's
+     * own scrollback above remains reachable by scrolling up. */
+    write_str(ANSI_CURSOR_HOME);
+    write_str(ANSI_CLEAR_SCREEN);
+
+    print_banner(tui);
 }
 
 // Prints one committed message into the transcript (scrollback): flushes

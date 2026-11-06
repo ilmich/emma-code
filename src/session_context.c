@@ -48,6 +48,27 @@ int session_context_init(session_context_t *context, size_t max_messages) {
 /**
  * @brief Cleans up and frees all memory associated with the session context.
  */
+int session_context_reset(session_context_t *context, const char *system_prompt) {
+    if (context == NULL) return -1;
+
+    // Free the content and role strings of every stored message.
+    for (size_t i = 0; i < context->count; ++i) {
+        message_clear(&context->messages[i]);
+    }
+    context->count = 0;
+
+    // Re-seed the context with the system prompt, when one is given.
+    if (system_prompt != NULL &&
+        session_context_add_message(context, "system", system_prompt) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Cleans up and frees all memory associated with the session context.
+ */
 void session_context_free(session_context_t *context) {
     if (context != NULL) {
 	// Free content and role strings for every message

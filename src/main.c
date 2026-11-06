@@ -31,6 +31,39 @@ typedef struct {
 	tui_t *tui;
 } tool_dispatch_ctx_t;
 
+/** Context handed to the /new command handler (all pointers borrowed). */
+typedef struct {
+	session_context_t *session;
+	tui_t *tui;
+	const char *system_prompt;
+} new_cmd_ctx_t;
+
+/** Built-in handler for /new: starts a new session by resetting the
+ *  conversation history (re-seeding the system prompt) and clearing the
+ *  screen. Arguments, when present, are ignored. */
+static cmd_result_t new_command(const cmd_invocation_t *inv, void *userdata,
+				char *feedback, size_t feedback_len)
+{
+	new_cmd_ctx_t *ctx = userdata;
+
+	(void)inv;
+	if (ctx == NULL || ctx->session == NULL || feedback == NULL ||
+	    feedback_len == 0)
+		return CMD_HANDLED;
+
+	if (session_context_reset(ctx->session, ctx->system_prompt) != 0) {
+		snprintf(feedback, feedback_len,
+			 "[error] failed to start a new session (out of memory); "
+			 "the conversation history was cleared");
+		return CMD_HANDLED;
+	}
+
+	if (ctx->tui != NULL)
+		tui_clear(ctx->tui);
+	snprintf(feedback, feedback_len, "Started a new session.");
+	return CMD_HANDLED;
+}
+
 static void config_free_strings(openai_config_t *config)
 {
 	free(config->api_key);
@@ -368,6 +401,17 @@ int main(void) {
         goto cleanup;
     }
     commands_ready = 1;
+
+    /* /new resets the conversation and clears the screen: it needs the
+     * session, the TUI and the system prompt, all alive by this point
+     * and owned by main until cleanup. */
+    new_cmd_ctx_t new_ctx = { &context, tui, prompt };
+    if (commands_register("new", new_command,
+                          "start a new session (clears the conversation)",
+                          &new_ctx) != 0) {
+        fprintf(stderr, "emma: failed to register the new command\n");
+        goto cleanup;
+    }
 
     if (tools_registry_init(&tools) != 0) {
         fprintf(stderr, "emma: failed to initialize tool registry\n");

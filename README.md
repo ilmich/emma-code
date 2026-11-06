@@ -9,7 +9,7 @@ Emma-Code is a lightweight terminal-based interface that allows you to interact 
 ## Features
 
 - Terminal UI for coding assistance
-- Slash commands with a runtime command registry (built-in `/exit`)
+- Slash commands with a runtime command registry (built-in `/exit`, `/new`)
 - Lua scripting engine: user scripts can register commands, drive the UI
   and hook into the message flow (`pre_message` / `post_message`)
 - Conversation history management with configurable message limits

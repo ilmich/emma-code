@@ -159,6 +159,85 @@ static void test_truncation_with_single_message_limit(void)
 	session_context_free(&ctx);
 }
 
+static void test_reset_null_context(void)
+{
+	TEST_CHECK_INT_EQ(session_context_reset(NULL, "sys"), -1);
+}
+
+static void test_reset_clears_messages_and_reseeds(void)
+{
+	session_context_t ctx;
+
+	TEST_CHECK_INT_EQ(session_context_init(&ctx, 10), 0);
+	TEST_CHECK_INT_EQ(session_context_add_message(&ctx, "system", "old sys"), 0);
+	TEST_CHECK_INT_EQ(session_context_add_message(&ctx, "user", "u1"), 0);
+	TEST_CHECK_INT_EQ(session_context_add_message(&ctx, "assistant", "a1"), 0);
+
+	TEST_CHECK_INT_EQ(session_context_reset(&ctx, "new sys"), 0);
+	TEST_CHECK_INT_EQ((long long)ctx.count, 1);
+	TEST_CHECK_STR_EQ(ctx.messages[0].role, "system");
+	TEST_CHECK_STR_EQ(ctx.messages[0].content, "new sys");
+	TEST_CHECK_INT_EQ((long long)ctx.max_messages, 10);
+
+	/* The context must keep working after the reset. */
+	TEST_CHECK_INT_EQ(session_context_add_message(&ctx, "user", "u1"), 0);
+	TEST_CHECK_INT_EQ((long long)ctx.count, 2);
+	TEST_CHECK_STR_EQ(ctx.messages[1].content, "u1");
+
+	session_context_free(&ctx);
+}
+
+static void test_reset_without_prompt(void)
+{
+	session_context_t ctx;
+
+	TEST_CHECK_INT_EQ(session_context_init(&ctx, 10), 0);
+	TEST_CHECK_INT_EQ(session_context_add_message(&ctx, "user", "u1"), 0);
+	TEST_CHECK_INT_EQ(session_context_add_message(&ctx, "assistant", "a1"), 0);
+
+	TEST_CHECK_INT_EQ(session_context_reset(&ctx, NULL), 0);
+	TEST_CHECK_INT_EQ((long long)ctx.count, 0);
+
+	session_context_free(&ctx);
+}
+
+static void test_reset_on_empty_context(void)
+{
+	session_context_t ctx;
+
+	TEST_CHECK_INT_EQ(session_context_init(&ctx, 5), 0);
+	TEST_CHECK_INT_EQ(session_context_reset(&ctx, "sys"), 0);
+	TEST_CHECK_INT_EQ((long long)ctx.count, 1);
+	TEST_CHECK_STR_EQ(ctx.messages[0].content, "sys");
+
+	session_context_free(&ctx);
+}
+
+static void test_reset_preserves_truncation_policy(void)
+{
+	session_context_t ctx;
+
+	TEST_CHECK_INT_EQ(session_context_init(&ctx, 3), 0);
+	TEST_CHECK_INT_EQ(session_context_add_message(&ctx, "user", "u0"), 0);
+	TEST_CHECK_INT_EQ(session_context_add_message(&ctx, "user", "u1"), 0);
+
+	TEST_CHECK_INT_EQ(session_context_reset(&ctx, "sys"), 0);
+
+	/* max_messages must survive the reset: filling past the limit still
+	 * evicts the oldest non-system message and keeps the system prompt. */
+	TEST_CHECK_INT_EQ(session_context_add_message(&ctx, "user", "u1"), 0);
+	TEST_CHECK_INT_EQ(session_context_add_message(&ctx, "user", "u2"), 0);
+	TEST_CHECK_INT_EQ(session_context_add_message(&ctx, "user", "u3"), 0);
+
+	TEST_CHECK_INT_EQ((long long)ctx.count, 3);
+	TEST_CHECK_STR_EQ(ctx.messages[0].role, "system");
+	TEST_CHECK_STR_EQ(ctx.messages[0].content, "sys");
+	TEST_CHECK_STR_EQ(ctx.messages[1].content, "u2");
+	TEST_CHECK_STR_EQ(ctx.messages[2].content, "u3");
+
+	session_context_free(&ctx);
+}
+
 static void test_free_is_null_safe_and_idempotent(void)
 {
 	session_context_t ctx;
@@ -314,6 +393,11 @@ int main(void)
 	TEST_RUN(test_truncation_all_system_drops_oldest);
 	TEST_RUN(test_truncation_with_single_message_limit);
 	TEST_RUN(test_free_is_null_safe_and_idempotent);
+	TEST_RUN(test_reset_null_context);
+	TEST_RUN(test_reset_clears_messages_and_reseeds);
+	TEST_RUN(test_reset_without_prompt);
+	TEST_RUN(test_reset_on_empty_context);
+	TEST_RUN(test_reset_preserves_truncation_policy);
 	TEST_RUN(test_add_tool_result);
 	TEST_RUN(test_add_tool_result_null_args);
 	TEST_RUN(test_add_assistant_tool_calls_deep_copy);

@@ -42,6 +42,23 @@ def fail(msg, output=b""):
     sys.exit(1)
 
 
+def send_exit_and_wait(master, proc):
+    """Writes /exit and waits for the process to terminate, retrying a
+    few times: keystrokes typed while a request is still in flight are
+    discarded by the watcher, so a single /exit can be lost. Returns
+    True when the process exited cleanly."""
+    for _ in range(5):
+        try:
+            os.write(master, b"/exit\r")
+        except OSError:
+            pass
+        for _ in range(20):  # up to ~2s per attempt
+            if proc.poll() is not None:
+                return proc.returncode == 0
+            time.sleep(0.1)
+    return False
+
+
 def read_until(fd, patterns, deadline, output):
     """Reads from fd until all byte patterns appeared or the deadline
     passes. Appends everything read to the output list. Returns True on
@@ -115,14 +132,8 @@ def run_session(binary, scenario, expect_text, extra_patterns=(),
                 fail("transcript incomplete after prompt", b"".join(output))
 
             # 3. Exit; the process must terminate cleanly.
-            os.write(master, b"/exit\r")
-            try:
-                rc = proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.send_signal(signal.SIGKILL)
+            if not send_exit_and_wait(master, proc):
                 fail("process did not exit after /exit", b"".join(output))
-            if rc != 0:
-                fail("exit code %d after /exit" % rc, b"".join(output))
 
             data = b"".join(output)
             if b"\x1b[2J" in data:
@@ -190,14 +201,85 @@ def run_interrupt_session(binary):
 
             # The input must be usable again: /exit terminates cleanly
             # (leftover watcher bytes would corrupt the command).
-            os.write(master, b"/exit\r")
-            try:
-                rc = proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.send_signal(signal.SIGKILL)
+            if not send_exit_and_wait(master, proc):
                 fail("process did not exit after ESC + /exit", b"".join(output))
-            if rc != 0:
-                fail("exit code %d after ESC + /exit" % rc, b"".join(output))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            os.close(master)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def run_new_session(binary):
+    """The /new command e2e: sends a prompt, receives the reply, runs
+    /new and verifies that the screen is cleared (ESC[2J), the banner is
+    printed again, the 'Started a new session.' feedback appears and the
+    session still works (a second prompt gets a second reply) before a
+    clean /exit."""
+    tmp = tempfile.mkdtemp(prefix="emma-pty-new-")
+    try:
+        cfg_dir = os.path.join(tmp, "emma")
+        os.makedirs(cfg_dir)
+        with open(os.path.join(cfg_dir, "config.toml"), "w") as f:
+            f.write('base_url = "http://127.0.0.1:%s/aistream/v1"\n'
+                    % os.environ["TEST_MOCK_PORT"])
+            f.write('api_key = "test-key-123"\n')
+            f.write('model = "test-model"\n')
+            f.write("stream = true\n")
+
+        env = dict(os.environ, XDG_CONFIG_HOME=tmp, TERM="xterm")
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+
+        proc = subprocess.Popen(
+            [binary], stdin=slave, stdout=slave, stderr=slave,
+            env=env, close_fds=True)
+        os.close(slave)
+
+        output = []
+        deadline = time.time() + TIMEOUT
+        try:
+            if not read_until(master, [b"You:"], deadline, output):
+                fail("banner or input prompt never appeared", b"".join(output))
+
+            # First exchange: the reply must appear before /new.
+            os.write(master, b"Hi\r")
+            if not read_until(master, [b"Hello from mock!"], deadline, output):
+                fail("first reply never appeared", b"".join(output))
+
+            # /new: the screen must be cleared, the banner reprinted and
+            # the feedback shown. Unlike the other scenarios this one
+            # EXPECTS the full-screen clear (ESC[2J). The /new is retried
+            # a few times: keystrokes typed while the previous request is
+            # still in flight are discarded by the watcher.
+            for _ in range(5):
+                os.write(master, b"/new\r")
+                if read_until(master, [b"Started a new session."],
+                              time.time() + 2.0, output):
+                    break
+            else:
+                fail("/new did not clear the screen with feedback",
+                     b"".join(output))
+            if not read_until(master, [b"You:"], deadline, output):
+                fail("prompt never came back after /new", b"".join(output))
+
+            # The session must still work after the reset: a second
+            # prompt gets a second reply (the reply text now appears a
+            # second time in the byte stream).
+            os.write(master, b"Hi\r")
+            while True:
+                data = b"".join(output)
+                if data.count(b"Hello from mock!") >= 2:
+                    break
+                if not read_until(master, [b"Hello from mock!"], deadline,
+                                  output):
+                    fail("session unusable after /new", b"".join(output))
+                    return
+
+            if not send_exit_and_wait(master, proc):
+                fail("process did not exit after /new + /exit", b"".join(output))
         finally:
             if proc.poll() is None:
                 proc.kill()
@@ -261,6 +343,10 @@ def main():
     # ESC during an in-flight (stalled) reply: the turn must end
     # promptly, keep the partial reply and return to the prompt.
     run_interrupt_session(binary)
+
+    # /new: the conversation restarts, the screen is cleared and the
+    # banner is printed again; the session keeps working afterwards.
+    run_new_session(binary)
 
     print("PASS pty_tui: transcript mode keeps history in the scrollback")
     return 0

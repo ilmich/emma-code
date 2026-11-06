@@ -142,4 +142,12 @@ char **tui_banner_lines(size_t *out_count);
  */
 void  tui_show_banner(tui_t *tui);
 
+/**
+ * Clears the visible screen and restarts the transcript from scratch:
+ * drops every stored message and streaming state, moves the cursor home,
+ * clears the screen (the terminal's own scrollback above stays reachable
+ * by scrolling up) and prints the startup banner again.
+ */
+void  tui_clear(tui_t *tui);
+
 #endif
