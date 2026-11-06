@@ -2,7 +2,7 @@
 
 # Configuration
 CC=${CC:-gcc}
-CFLAGS=${CFLAGS:-"-Wall -Wextra -std=c99 -O2 -fanalyzer"}
+CFLAGS=${CFLAGS:-"-Wall -Wextra -std=c99 -O2 -fanalyzer -pthread"}
 SRC_DIR="src"
 INC_DIR="include"
 BINDIR=${BINDIR:-"./"}
@@ -38,6 +38,7 @@ SOURCES=(
     "${SRC_DIR}/openai_client.c"
     "${SRC_DIR}/session_context.c"
     "${SRC_DIR}/tui.c"
+    "${SRC_DIR}/interrupt.c"
     "${SRC_DIR}/toml.c"
     "${SRC_DIR}/commands.c"
     "${SRC_DIR}/lua_scripting.c"
@@ -46,6 +47,7 @@ SOURCES=(
     "${SRC_DIR}/markdown.c"
     "${SRC_DIR}/tools.c"
     "${SRC_DIR}/system_prompt.c"
+    "${SRC_DIR}/theme.c"
 )
 
 # Object files mapping

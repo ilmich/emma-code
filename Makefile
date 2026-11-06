@@ -17,7 +17,7 @@ CJSON_LIBS := $(shell pkg-config --libs libcjson)
 LUA_CFLAGS := $(shell pkg-config --cflags $(LUA_PKG))
 LUA_LIBS := $(shell pkg-config --libs $(LUA_PKG))
 
-CFLAGS := -std=c99 -Wall -Wextra -O2 -Iinclude -fanalyzer $(CURL_CFLAGS) $(CJSON_CFLAGS) $(LUA_CFLAGS)
+CFLAGS := -std=c99 -Wall -Wextra -O2 -Iinclude -fanalyzer -pthread $(CURL_CFLAGS) $(CJSON_CFLAGS) $(LUA_CFLAGS)
 SRCDIR := src
 BUILDDIR := build
 TARGET := emma-code
@@ -28,13 +28,13 @@ SOURCES := $(SRCDIR)/main.c $(SRCDIR)/http_client.c $(SRCDIR)/openai_client.c \
 	$(SRCDIR)/session_context.c $(SRCDIR)/tui.c $(SRCDIR)/toml.c \
 	$(SRCDIR)/commands.c $(SRCDIR)/lua_scripting.c $(SRCDIR)/agent_loop.c \
 	$(SRCDIR)/util.c $(SRCDIR)/markdown.c $(SRCDIR)/tools.c \
-	$(SRCDIR)/system_prompt.c $(SRCDIR)/theme.c
+	$(SRCDIR)/system_prompt.c $(SRCDIR)/theme.c $(SRCDIR)/interrupt.c
 OBJECTS := $(SOURCES:$(SRCDIR)/%.c=$(BUILDDIR)/%.o)
 
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS)
-	$(CC) $(OBJECTS) $(CURL_LIBS) $(CJSON_LIBS) $(LUA_LIBS) -o $@
+	$(CC) $(CFLAGS) $(OBJECTS) $(CURL_LIBS) $(CJSON_LIBS) $(LUA_LIBS) -o $@
 
 $(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -51,7 +51,8 @@ test: $(TESTBIN)/test_session_context $(TESTBIN)/test_openai_client \
 	$(TESTBIN)/test_http_client $(TESTBIN)/test_toml $(TESTBIN)/test_commands \
 	$(TESTBIN)/test_lua_scripting $(TESTBIN)/test_tui $(TESTBIN)/test_agent_loop \
 	$(TESTBIN)/test_util $(TESTBIN)/test_markdown $(TESTBIN)/test_tools \
-	$(TESTBIN)/test_system_prompt $(TESTBIN)/test_theme
+	$(TESTBIN)/test_system_prompt $(TESTBIN)/test_theme \
+	$(TESTBIN)/test_interrupt
 	$(TESTDIR)/run_tests.sh
 
 # End-to-end routing checks against the local mock OpenAI server.
@@ -141,12 +142,19 @@ $(TESTBIN)/test_markdown: $(TESTDIR)/test_markdown.c $(TESTDIR)/test.h \
 
 $(TESTBIN)/test_agent_loop: $(TESTDIR)/test_agent_loop.c $(TESTDIR)/test.h \
 		$(BUILDDIR)/agent_loop.o $(BUILDDIR)/openai_client.o $(BUILDDIR)/http_client.o \
-		$(BUILDDIR)/session_context.o $(BUILDDIR)/tui.o $(BUILDDIR)/theme.o \
-		$(BUILDDIR)/toml.o $(BUILDDIR)/markdown.o $(BUILDDIR)/util.o | $(TESTBIN)
+		$(BUILDDIR)/interrupt.o $(BUILDDIR)/session_context.o $(BUILDDIR)/tui.o \
+		$(BUILDDIR)/theme.o $(BUILDDIR)/toml.o $(BUILDDIR)/markdown.o \
+		$(BUILDDIR)/util.o | $(TESTBIN)
 	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_agent_loop.c \
 		$(BUILDDIR)/agent_loop.o $(BUILDDIR)/openai_client.o $(BUILDDIR)/http_client.o \
-		$(BUILDDIR)/session_context.o $(BUILDDIR)/tui.o $(BUILDDIR)/theme.o \
-		$(BUILDDIR)/toml.o $(BUILDDIR)/markdown.o $(BUILDDIR)/util.o \
+		$(BUILDDIR)/interrupt.o $(BUILDDIR)/session_context.o $(BUILDDIR)/tui.o \
+		$(BUILDDIR)/theme.o $(BUILDDIR)/toml.o $(BUILDDIR)/markdown.o \
+		$(BUILDDIR)/util.o \
 		-o $@ $(CURL_LIBS) $(CJSON_LIBS)
+
+$(TESTBIN)/test_interrupt: $(TESTDIR)/test_interrupt.c $(TESTDIR)/test.h \
+		$(BUILDDIR)/interrupt.o | $(TESTBIN)
+	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_interrupt.c \
+		$(BUILDDIR)/interrupt.o -o $@
 
 .PHONY: all clean test e2e check

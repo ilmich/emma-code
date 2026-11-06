@@ -170,6 +170,80 @@ static void test_http_stream_sse_no_space(void)
 	http_response_free(&resp);
 }
 
+/* Abort check that fires immediately (before any data): models the user
+ * pressing ESC while the request is still waiting for the response. */
+static int abort_immediately(void *user_data)
+{
+	(void)user_data;
+	return 1;
+}
+
+/* Abort check that fires only once some SSE data has been dispatched to
+ * the collector: models ESC pressed after the first chunk arrived. The
+ * libcurl progress callback runs periodically (also while the stream
+ * stalls), so this fires during the slowstream stall. */
+static int abort_after_first_event(void *user_data)
+{
+	(void)user_data;
+	return g_collector.len > 0;
+}
+
+static void test_http_abort_nonstreaming(void)
+{
+	char url[128];
+	struct http_request_t req = {0};
+	struct http_response_t resp = {0};
+
+	/* The slownonstream scenario stalls before answering: the abort
+	 * must fire through the progress callback even though no data ever
+	 * arrives (ESC must block non-streaming interactions too). */
+	if (build_url(url, sizeof(url), "slownonstream/v1/chat/completions") != 0) {
+		return;
+	}
+	req.url = url;
+	req.method = (char *)"POST";
+	req.body = (char *)"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}";
+	req.abort_check = abort_immediately;
+	req.abort_user_data = NULL;
+
+	TEST_CHECK_INT_EQ(http_request(&req, &resp), 2);
+
+	http_response_free(&resp);
+}
+
+static void test_http_abort_streaming_partial_body(void)
+{
+	char url[128];
+	struct http_request_t req = {0};
+	struct http_response_t resp = {0};
+
+	/* The slowstream scenario sends one SSE event immediately, then
+	 * stalls: the abort must fire during the stall (progress callback)
+	 * while the first event was already dispatched to the callback. */
+	if (build_url(url, sizeof(url), "slowstream/v1/chat/completions") != 0) {
+		return;
+	}
+	req.url = url;
+	req.method = (char *)"POST";
+	req.body = (char *)"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}],\"stream\":true}";
+	req.headers = (char **)((char *[]){ (char *)"Content-Type: application/json",
+					   (char *)"Authorization: Bearer test-key-123" });
+	req.headers_count = 2;
+	req.callback = sse_collect;
+	req.user_data = &g_collector;
+	req.abort_check = abort_after_first_event;
+	req.abort_user_data = NULL;
+
+	memset(&g_collector, 0, sizeof(g_collector));
+
+	TEST_CHECK_INT_EQ(http_request(&req, &resp), 2);
+	/* The first streamed event was dispatched before the abort (the
+	 * collector receives the raw SSE payload: the JSON chunk). */
+	TEST_CHECK_NOT_NULL(strstr(g_collector.buf, "\"Hello\""));
+
+	http_response_free(&resp);
+}
+
 static void test_http_response_free_null_safe(void)
 {
 	/* NULL and double free must not crash. */
@@ -220,6 +294,8 @@ int main(void)
 	TEST_RUN(test_http_stream_sse);
 	TEST_RUN(test_http_stream_sse_crlf);
 	TEST_RUN(test_http_stream_sse_no_space);
+	TEST_RUN(test_http_abort_nonstreaming);
+	TEST_RUN(test_http_abort_streaming_partial_body);
 
 	http_client_cleanup();
 

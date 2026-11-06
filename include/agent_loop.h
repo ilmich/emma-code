@@ -16,6 +16,7 @@
 
 #include "openai_client.h"
 #include "session_context.h"
+#include "interrupt.h"
 
 /** Default cap on tool-call rounds per message (loop safety guard). */
 #define AGENT_LOOP_MAX_ROUNDS_DEFAULT 10
@@ -25,7 +26,13 @@ typedef enum {
 	AGENT_MSG_OK,    /**< reply obtained; *reply is caller-owned (free()) */
 	AGENT_MSG_ERROR, /**< completion failed; *reply is NULL; the caller
 			      owns all error/status rendering */
-	AGENT_MSG_EXIT   /**< fatal error (session full): caller must stop */
+	AGENT_MSG_EXIT,  /**< fatal error (session full): caller must stop */
+	AGENT_MSG_INTERRUPTED /**< the user pressed ESC during the completion
+			      (streaming or not): *reply holds the partial
+			      streamed text (NULL when none, e.g. non-streaming
+			      or nothing arrived); the caller owns it and decides
+			      about session storage and display. No tool calls
+			      from the interrupted response are executed. */
 } agent_msg_result_t;
 
 /**

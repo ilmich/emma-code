@@ -9,6 +9,23 @@
 
 #define OPENAI_API_URL "/v1/chat/completions"
 
+/** Optional interrupt check (ESC): polled by the HTTP client during the
+ *  request. Registered by the app with openai_set_interrupt_check(). */
+static int (*g_interrupt_check)(void) = NULL;
+
+void openai_set_interrupt_check(int (*check)(void))
+{
+    g_interrupt_check = check;
+}
+
+/** http_request_t.abort_check adapter: bridges the void* callback to the
+ *  registered zero-argument interrupt check. */
+static int interrupt_trampoline(void *unused)
+{
+    (void)unused;
+    return g_interrupt_check != NULL && g_interrupt_check() != 0;
+}
+
 void openai_tool_calls_free(openai_tool_call_t *calls, size_t count)
 {
     if (calls == NULL)
@@ -658,8 +675,10 @@ static void stream_event(const char *buffer, size_t size, void *user_data)
  *
  * Builds URL, headers and JSON payload (with "stream": true when @p stream
  * is nonzero), executes the request and validates the status code. On any
- * failure the response is freed and 1 is returned; on success *resp is
- * populated and owned by the caller (free with http_response_free()).
+ * failure the response is freed and 1 is returned; when the request is
+ * interrupted through the registered interrupt check (ESC), 2 is returned;
+ * on success *resp is populated and owned by the caller (free with
+ * http_response_free()).
  */
 static int send_request(
     const openai_config_t *config,
@@ -713,11 +732,23 @@ static int send_request(
     req.headers_count = headers_count;
     req.callback = stream_callback;
     req.user_data = stream_user_data;
+    req.abort_check = g_interrupt_check != NULL ? interrupt_trampoline : NULL;
+    req.abort_user_data = NULL;
 
     memset(resp, 0, sizeof(*resp));
-    if (http_request(&req, resp) != 0) {
-        fprintf(stderr, "HTTP Request failed.\n");
-        goto cleanup;
+    {
+        int http_status = http_request(&req, resp);
+
+        if (http_status == 2) {
+            /* Interrupted (ESC): the partial body is not usable as a
+             * completion; report the interruption to the caller. */
+            status = 2;
+            goto cleanup;
+        }
+        if (http_status != 0) {
+            fprintf(stderr, "HTTP Request failed.\n");
+            goto cleanup;
+        }
     }
 
     // Handle HTTP-level errors
@@ -744,12 +775,13 @@ int openai_chat_completion(
     openai_response_t *response) 
 {
     struct http_response_t resp;
+    int req_status;
     int parse_status;
 
-    if (send_request(config, messages, message_count, 0, NULL, NULL,
-                     &resp) != 0) {
-        return 1;
-    }
+    req_status = send_request(config, messages, message_count, 0, NULL, NULL,
+                              &resp);
+    if (req_status != 0)
+        return req_status; /* 1 = failure, 2 = interrupted */
 
     // Parse the response, then clean up.
     parse_status = parse_response(resp.body, response);
@@ -767,19 +799,25 @@ int openai_chat_completion_stream(
 {
     struct stream_ctx ctx = {0};
     struct http_response_t resp;
+    int req_status;
     int status = 1;
 
     ctx.on_delta = on_delta;
     ctx.user_data = user_data;
 
-    if (send_request(config, messages, message_count, 1, stream_event,
-                     &ctx, &resp) != 0) {
+    /* 0 = ok, 1 = failure, 2 = interrupted (ESC). On interruption the
+     * deltas already forwarded (and accumulated in ctx) are still handed
+     * back as partial content below. */
+    req_status = send_request(config, messages, message_count, 1,
+                              stream_event, &ctx, &resp);
+    if (req_status == 1)
         goto cleanup;
-    }
+    status = req_status;
 
     if (ctx.got_event) {
         // Server honored "stream": true. The accumulated buffer holds the
-        // full text; an event-only stream without content yields "".
+        // full (or, when interrupted, partial) text; an event-only stream
+        // without content yields "".
         if (!ctx.oom) {
             if (ctx.content != NULL) {
                 response->content = ctx.content;
@@ -805,7 +843,11 @@ int openai_chat_completion_stream(
                 ctx.tool_call_count = 0;
             }
         }
-        status = (ctx.oom || response->content == NULL) ? 1 : 0;
+        status = (ctx.oom || response->content == NULL) ? 1 : req_status;
+    } else if (req_status == 2) {
+        // Interrupted before any SSE event arrived (or mid-body of a
+        // plain JSON answer): no partial content is available.
+        goto cleanup;
     } else {
         // The server ignored "stream": true and answered with a plain JSON
         // body: fall back to the non-streaming parser.

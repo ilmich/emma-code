@@ -16,10 +16,53 @@
 #include "test.h"
 #include "agent_loop.h"
 #include "http_client.h"
+#include "interrupt.h"
 
+#include <pthread.h>
+#include <sys/select.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Sleeps @p ms milliseconds via select() (portable, no feature macros). */
+static void msleep(int ms)
+{
+	struct timeval tv;
+
+	tv.tv_sec = ms / 1000;
+	tv.tv_usec = (ms % 1000) * 1000;
+	(void)select(0, NULL, NULL, NULL, &tv);
+}
+
+/* Raises the interrupt flag after a short delay, simulating the user
+ * pressing ESC while the completion request is in flight. */
+static void *delayed_interrupt_trigger(void *arg)
+{
+	(void)arg;
+	msleep(300);
+	interrupt_trigger();
+	return NULL;
+}
+
+/** Runs agent_loop_handle_message() with a delayed ESC trigger thread.
+ *  Returns the handle_message result; the thread is always joined. */
+static agent_msg_result_t run_interrupted_turn(agent_loop_t *loop, char *input,
+					       char **reply, char **reasoning)
+{
+	pthread_t tid;
+	agent_msg_result_t res;
+
+	if (pthread_create(&tid, NULL, delayed_interrupt_trigger, NULL) != 0) {
+		test__failures++;
+		fprintf(stderr, "  FAIL %s:%d: pthread_create\n", __FILE__,
+			__LINE__);
+		free(input);
+		return AGENT_MSG_ERROR;
+	}
+	res = agent_loop_handle_message(loop, input, reply, reasoning);
+	pthread_join(tid, NULL);
+	return res;
+}
 
 /* Delta collector for the streaming agent-loop test, passed through
  * loop.delta_user_data. */
@@ -423,6 +466,105 @@ static int recording_dispatch(const char *name, const char *args_json,
 	return *result == NULL;
 }
 
+static void test_interrupted_streaming_keeps_partial_reply(void)
+{
+	char base[128];
+	session_context_t ctx;
+	openai_config_t cfg;
+	agent_loop_t loop;
+	char *reply = NULL;
+	char *reasoning = NULL;
+
+	/* slowstream: one content delta immediately, then a long stall.
+	 * The delayed ESC trigger fires during the stall. */
+	if (build_url(base, sizeof(base), "slowstream") != 0)
+		return;
+	if (make_loop(&loop, &ctx, &cfg, base) != 0)
+		return;
+	cfg.stream = 1;
+	loop.on_delta = delta_collect;
+	loop.delta_user_data = &g_deltas;
+
+	char *input = dup_str("Hello");
+	TEST_CHECK_NOT_NULL(input);
+	memset(&g_deltas, 0, sizeof(g_deltas));
+	TEST_CHECK_INT_EQ((long long)run_interrupted_turn(&loop, input, &reply,
+							  &reasoning),
+			  (long long)AGENT_MSG_INTERRUPTED);
+	/* The partial streamed text is handed back for the caller to store
+	 * and display; the deltas reached the callback too. */
+	TEST_CHECK_STR_EQ(reply, "Hello");
+	TEST_CHECK_STR_EQ(g_deltas.buf, "Hello");
+	/* Only the user message is in the session: storing the partial
+	 * reply is the caller's (main.c) job, and no tool call from the
+	 * interrupted response may dangle. */
+	TEST_CHECK_INT_EQ((long long)ctx.count, 1);
+	TEST_CHECK_STR_EQ(ctx.messages[0].role, "user");
+
+	free(reply);
+	free(reasoning);
+	session_context_free(&ctx);
+}
+
+static void test_interrupted_nonstreaming(void)
+{
+	char base[128];
+	session_context_t ctx;
+	openai_config_t cfg;
+	agent_loop_t loop;
+	char *reply = NULL;
+	char *reasoning = NULL;
+
+	/* slownonstream stalls before answering: ESC must abort the
+	 * non-streaming request too, with no partial content. */
+	if (build_url(base, sizeof(base), "slownonstream") != 0)
+		return;
+	if (make_loop(&loop, &ctx, &cfg, base) != 0)
+		return;
+
+	char *input = dup_str("Hello");
+	TEST_CHECK_NOT_NULL(input);
+	TEST_CHECK_INT_EQ((long long)run_interrupted_turn(&loop, input, &reply,
+							  &reasoning),
+			  (long long)AGENT_MSG_INTERRUPTED);
+	TEST_CHECK_NULL(reply);
+	TEST_CHECK_INT_EQ((long long)ctx.count, 1);
+	TEST_CHECK_STR_EQ(ctx.messages[0].role, "user");
+
+	free(reply);
+	free(reasoning);
+	session_context_free(&ctx);
+}
+
+static void test_interrupt_flag_cleared_between_turns(void)
+{
+	char base[128];
+	session_context_t ctx;
+	openai_config_t cfg;
+	agent_loop_t loop;
+	char *reply = NULL;
+	char *reasoning = NULL;
+
+	if (build_url(base, sizeof(base), "ok") != 0)
+		return;
+	if (make_loop(&loop, &ctx, &cfg, base) != 0)
+		return;
+
+	/* A stale interrupt flag must never abort the next turn. */
+	interrupt_trigger();
+
+	char *input = dup_str("Hello");
+	TEST_CHECK_NOT_NULL(input);
+	TEST_CHECK_INT_EQ((long long)agent_loop_handle_message(&loop, input,
+							       &reply, &reasoning),
+			  (long long)AGENT_MSG_OK);
+	TEST_CHECK_STR_EQ(reply, "Hello from mock!");
+
+	free(reply);
+	free(reasoning);
+	session_context_free(&ctx);
+}
+
 static void test_tool_round_success(void)
 {
 	char base[128];
@@ -609,6 +751,10 @@ static void test_tool_session_full_exits(void)
 int main(void)
 {
 	TEST_CHECK_INT_EQ(http_client_init(), 0);
+	/* Same wiring as main.c: the HTTP client polls the interrupt flag
+	 * (raised by the ESC watcher / interrupt_trigger()) during every
+	 * completion request. */
+	openai_set_interrupt_check(interrupt_requested);
 
 	TEST_RUN(test_null_loop);
 	TEST_RUN(test_null_input);
@@ -620,12 +766,16 @@ int main(void)
 	TEST_RUN(test_full_turn_reasoning);
 	TEST_RUN(test_full_turn_reasoning_streaming);
 	TEST_RUN(test_unreachable_server);
+	TEST_RUN(test_interrupted_streaming_keeps_partial_reply);
+	TEST_RUN(test_interrupted_nonstreaming);
+	TEST_RUN(test_interrupt_flag_cleared_between_turns);
 	TEST_RUN(test_tool_round_success);
 	TEST_RUN(test_tool_round_streaming);
 	TEST_RUN(test_tool_calls_without_dispatcher);
 	TEST_RUN(test_tool_round_limit);
 	TEST_RUN(test_tool_session_full_exits);
 
+	openai_set_interrupt_check(NULL);
 	http_client_cleanup();
 
 	if (test__failures > 0) {

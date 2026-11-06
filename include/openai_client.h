@@ -6,6 +6,19 @@
 #ifndef OPENAI_CLIENT_H
 #define OPENAI_CLIENT_H
 
+/**
+ * @brief Registers the interrupt check polled during every completion
+ *        request (streaming and non-streaming).
+ *
+ * When the check returns nonzero the in-flight HTTP request is aborted as
+ * soon as possible and the openai_chat_completion*() functions return 2
+ * ("interrupted"). May be called with NULL to unregister. Typical check:
+ * interrupt_requested() (see interrupt.h), raised by the ESC watcher.
+ *
+ * @param check Zero-argument check function (may be NULL).
+ */
+void openai_set_interrupt_check(int (*check)(void));
+
 #include <stddef.h>
 
 /**
@@ -101,7 +114,8 @@ void openai_message_free(openai_message_t *msg);
  * @param messages Array of messages in the conversation.
  * @param message_count The number of messages in the array.
  * @param response Pointer to the structure where the response content will be stored.
- * @return 0 on success, 1 on failure.
+ * @return 0 on success, 1 on failure, 2 when interrupted through the
+ *         check registered with openai_set_interrupt_check() (ESC).
  */
 int openai_chat_completion(
     const openai_config_t *config,
@@ -130,6 +144,10 @@ int openai_chat_completion(
  *
  * Malformed or metadata-only chunks are ignored with a warning on stderr;
  * fatal errors (network, HTTP error status, out of memory) return 1.
+ * When the request is interrupted through the check registered with
+ * openai_set_interrupt_check() (ESC), 2 is returned and response holds
+ * the partial content accumulated so far (empty when the interruption
+ * happened before any delta arrived).
  *
  * @param config The configuration including API key and base URL.
  * @param messages Array of messages in the conversation.

@@ -19,24 +19,41 @@
 #include <string.h>
 
 /**
- * @brief Performs one completion request (streaming or not) into response.
+ * @brief Performs one completion request (streaming or not) into response,
+ *        with the ESC watcher active for the duration.
  *
- * @return 0 on success, nonzero on failure.
+ * The watcher reads and discards stdin keystrokes and raises the
+ * interrupt flag on a lone ESC; it is stopped before returning so stdin
+ * is free again for tui_read_input()/tui_confirm(). Both the streaming
+ * and the non-streaming path are covered: the abort check registered via
+ * openai_set_interrupt_check() is polled by libcurl during the request,
+ * also while waiting for the response.
+ *
+ * @return 0 on success, 1 on failure, 2 when interrupted by the user.
  */
 static int run_completion(const agent_loop_t *loop, openai_response_t *response)
 {
+	int status;
+
+	interrupt_reset();
+	if (interrupt_watch_start() != 0)
+		fprintf(stderr, "agent_loop: ESC watcher unavailable "
+				"(interruption disabled)\n");
 	if (loop->config->stream) {
-		return openai_chat_completion_stream(loop->config,
-						     loop->session->messages,
-						     loop->session->count,
-						     loop->on_delta,
-						     loop->delta_user_data,
-						     response);
+		status = openai_chat_completion_stream(loop->config,
+						       loop->session->messages,
+						       loop->session->count,
+						       loop->on_delta,
+						       loop->delta_user_data,
+						       response);
+	} else {
+		status = openai_chat_completion(loop->config,
+						loop->session->messages,
+						loop->session->count,
+						response);
 	}
-	return openai_chat_completion(loop->config,
-				      loop->session->messages,
-				      loop->session->count,
-				      response);
+	interrupt_watch_stop();
+	return status;
 }
 
 /**
@@ -108,6 +125,36 @@ agent_msg_result_t agent_loop_handle_message(agent_loop_t *loop, char *input,
 	for (int round = 0; round <= max_rounds; round++) {
 		int api_status = run_completion(loop, &response);
 
+		if (api_status == 2) {
+			/* Interrupted by the user (ESC, streaming or not):
+			 * hand back any partial streamed content; tool calls
+			 * from the interrupted response are never executed. */
+			if (response.content != NULL &&
+			    response.content[0] != '\0') {
+				copy = util_strdup(response.content);
+				if (copy == NULL) {
+					fprintf(stderr, "agent_loop: out of "
+							"memory\n");
+					goto cleanup;
+				}
+				*reply = copy;
+				copy = NULL; /* ownership transferred */
+				if (reasoning != NULL &&
+				    response.reasoning != NULL) {
+					reasoning_copy =
+						util_strdup(response.reasoning);
+					if (reasoning_copy == NULL) {
+						fprintf(stderr, "agent_loop: "
+							"out of memory\n");
+						goto cleanup;
+					}
+					*reasoning = reasoning_copy;
+					reasoning_copy = NULL;
+				}
+			}
+			result = AGENT_MSG_INTERRUPTED;
+			goto cleanup;
+		}
 		if (api_status != 0)
 			goto cleanup; /* ERROR: caller renders the failure */
 

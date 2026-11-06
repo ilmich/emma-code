@@ -15,6 +15,9 @@ struct mem_struct {
     http_stream_callback_t callback;
     void *user_data;
     size_t last_pos;
+    int (*abort_fn)(void *abort_user_data); /* optional abort check */
+    void *abort_data;
+    int aborted;                            /* set when abort fired */
 };
 
 // Case-insensitive check whether a header line announces an SSE stream.
@@ -69,6 +72,13 @@ static char *find_event_end(char *p, char *end) {
 static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t realsize = size * nmemb;
     struct mem_struct *mem = (struct mem_struct *)userp;
+
+    /* Abort requested: returning 0 makes libcurl fail the transfer with
+     * CURLE_WRITE_ERROR; http_request() then reports it as an abort. */
+    if (mem->abort_fn && mem->abort_fn(mem->abort_data)) {
+        mem->aborted = 1;
+        return 0;
+    }
 
     char *ptr = realloc(mem->data, mem->size + realsize + 1);
     if (!ptr) {
@@ -186,6 +196,26 @@ static void http_headers_free(char **headers, size_t count) {
     free(headers);
 }
 
+/* Libcurl progress callback: invoked periodically even when no data is
+ * flowing (e.g. while waiting for the server response), so an abort is
+ * honored also for non-streaming interactions. Returning nonzero aborts
+ * the transfer with CURLE_ABORTED_BY_CALLBACK. */
+static int xferinfo_callback(void *clientp,
+                             curl_off_t dltotal, curl_off_t dlnow,
+                             curl_off_t ultotal, curl_off_t ulnow) {
+    struct mem_struct *mem = (struct mem_struct *)clientp;
+
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    if (mem->abort_fn && mem->abort_fn(mem->abort_data)) {
+        mem->aborted = 1;
+        return 1;
+    }
+    return 0;
+}
+
 int http_request(const struct http_request_t *req, struct http_response_t *resp) {
     CURL *curl = NULL;
     CURLcode res;
@@ -211,6 +241,9 @@ int http_request(const struct http_request_t *req, struct http_response_t *resp)
     chunk.user_data = req->user_data;
     chunk.last_pos = 0;
     chunk.streaming = 0;
+    chunk.abort_fn = req->abort_check;
+    chunk.abort_data = req->abort_user_data;
+    chunk.aborted = 0;
 
     curl_easy_setopt(curl, CURLOPT_URL, req->url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
@@ -245,8 +278,29 @@ int http_request(const struct http_request_t *req, struct http_response_t *resp)
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_callback);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, (void *)&chunk);
 
+    if (req->abort_check) {
+        /* Enable the progress callback so the abort check runs even
+         * while no data is flowing (waiting for the response). */
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xferinfo_callback);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, (void *)&chunk);
+    }
+
     res = curl_easy_perform(curl);
     if (res != CURLE_OK) {
+        if (chunk.aborted ||
+            (req->abort_check && req->abort_check(req->abort_user_data))) {
+            /* Aborted on purpose: hand the partial body back to the
+             * caller (it decides whether to use it) and report 2. */
+            resp->body = chunk.data;
+            resp->body_len = chunk.size;
+            resp->headers = chunk.headers;
+            resp->headers_count = chunk.headers_count;
+            chunk.data = NULL;      /* ownership transferred to resp */
+            chunk.headers = NULL;
+            status = 2;
+            goto cleanup;
+        }
         fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
         goto cleanup;
     }

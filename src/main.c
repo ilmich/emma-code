@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "agent_loop.h"
+#include "interrupt.h"
 #include "theme.h"
 #include "util.h"
 #include "commands.h"
@@ -297,10 +298,6 @@ static int dispatch_tool(const char *name, const char *arguments_json,
 	return *result == NULL;
 }
 
-/* Reset before every message: clears the status line on the first
- * streamed delta so it does not linger over the live reply. */
-static int g_status_cleared;
-
 /** Forward each streamed delta to the TUI (streaming reply rendering). */
 static void on_delta(const char *text, int is_reasoning, void *user_data)
 {
@@ -308,10 +305,6 @@ static void on_delta(const char *text, int is_reasoning, void *user_data)
 
 	if (tui == NULL || text == NULL || *text == '\0')
 		return;
-	if (!g_status_cleared) {
-		g_status_cleared = 1;
-		tui_set_status(tui, NULL);
-	}
 	if (is_reasoning)
 		tui_stream_reasoning_append(tui, text);
 	else
@@ -338,6 +331,11 @@ int main(void) {
         return 1;
     }
     http_ready = 1;
+
+    /* ESC interruption of the in-flight completion (streaming and
+     * non-streaming): the HTTP client polls this check during every
+     * request; the ESC watcher is started by agent_loop around it. */
+    openai_set_interrupt_check(interrupt_requested);
 
     if (load_config(&config, &scripts_dir, &max_history,
                     &max_tool_rounds, &theme) != 0)
@@ -448,8 +446,7 @@ int main(void) {
         /* Show the user message (with any pre_message replacement) and
          * turn on the status line; agent_loop performs no rendering. */
         tui_append_message(tui, "user", input);
-        tui_set_status(tui, "Working...");
-        g_status_cleared = 0;
+        tui_set_status(tui, "Working... (ESC to interrupt)");
 
         /* Send the message and get the raw assistant reply; command
          * dispatch, hooks and all rendering stay here, out of agent_loop. */
@@ -463,6 +460,23 @@ int main(void) {
         if (res == AGENT_MSG_ERROR) {
             tui_append_message(tui, "assistant",
                                "[Error: failed to get response]");
+            continue;
+        }
+        if (res == AGENT_MSG_INTERRUPTED) {
+            /* The user pressed ESC: keep the partial streamed reply
+             * visible and in the session history (the model sees it on
+             * the next turn), then show a visible interruption marker. */
+            if (reply != NULL && reply[0] != '\0') {
+                tui_replace_assistant_message(tui, reply, reasoning);
+                if (session_context_add_message(&context, "assistant",
+                                                reply) != 0)
+                    tui_append_message(tui, "system",
+                                       "[Warning: failed to store assistant "
+                                       "message in history]");
+            }
+            tui_append_message(tui, "system", "[interrupted]");
+            free(reply);
+            free(reasoning);
             continue;
         }
 

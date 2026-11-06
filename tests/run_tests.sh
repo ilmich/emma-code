@@ -22,6 +22,7 @@ status=0
 ./build/tests/test_commands || status=1
 ./build/tests/test_tools || status=1
 ./build/tests/test_system_prompt || status=1
+./build/tests/test_interrupt || status=1
 
 if ! command -v python3 >/dev/null 2>&1; then
     echo "SKIP network tests: python3 not found" >&2

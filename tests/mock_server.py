@@ -58,12 +58,20 @@ Scenarios are selected by the first path segment, e.g. a request to
                  as "ok"): reasoning_content deltas "Step one.",
                  " Step two." followed by content deltas spelling
                  "Hello from mock!" and [DONE]
+  slowstream   - 200 text/event-stream (POST; same auth/payload checks
+                 as "ok"): one content delta "Hello" immediately, then a
+                 long stall before the rest: used to test ESC
+                 interruption while the response is in flight
+  slownonstream - 200 with the standard reply only after a long stall
+                 (POST; same auth/payload checks as "ok"): used to test
+                 ESC interruption of NON-streaming interactions
 
 The server binds to an ephemeral port on 127.0.0.1 and prints the port
 number on stdout (flushed immediately) so the test runner can export it.
 """
 
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 API_KEY = "Bearer test-key-123"
@@ -250,6 +258,20 @@ REASONING_STREAM_BODY = b"".join([
     b"data: [DONE]\n\n",
 ])
 
+# Interruption tests: far longer than any test wait, so a client that is
+# still connected after its abort window has failed the test. The server
+# runs each request in a daemon thread, so an abandoned stall dies with
+# the process.
+SLOW_DELAY_SECONDS = 30
+
+
+def _slow_stream_rest():
+    """The tail of the slow stream, sent after the stall."""
+    return b"".join([
+        b"data: " + _ai_chunk(" from mock!") + b"\n\n",
+        b"data: [DONE]\n\n",
+    ])
+
 
 def _has_tool_result(payload):
     """True when the request messages contain a role "tool" message."""
@@ -273,6 +295,24 @@ class MockHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _respond_slow_stream(self):
+        """One immediate content delta, then a long stall: a client that
+        interrupts (ESC) disconnects during the stall and the remaining
+        writes fail harmlessly."""
+        first = b"data: " + _ai_chunk("Hello") + b"\n\n"
+        rest = _slow_stream_rest()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(first) + len(rest)))
+        self.end_headers()
+        try:
+            self.wfile.write(first)
+            self.wfile.flush()
+            time.sleep(SLOW_DELAY_SECONDS)
+            self.wfile.write(rest)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def do_GET(self):
         scenario = scenario_of(self.path)
@@ -348,6 +388,16 @@ class MockHandler(BaseHTTPRequestHandler):
 
         elif scenario == "ssereasoning":
             self._respond(200, REASONING_STREAM_BODY, "text/event-stream")
+
+        elif scenario == "slowstream":
+            self._respond_slow_stream()
+
+        elif scenario == "slownonstream":
+            time.sleep(SLOW_DELAY_SECONDS)
+            try:
+                self._respond(200, json.dumps(VALID_RESPONSE).encode())
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
 
         elif scenario == "longreason":
             self._respond(200, LONG_REASON_BODY, "text/event-stream")

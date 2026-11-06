@@ -99,6 +99,12 @@ struct http_request_t {
     size_t headers_count;        ///< Number of headers in the array.
     http_stream_callback_t callback; ///< Callback to handle incoming streamed data.
     void* user_data;              ///< Pointer to user-defined data, passed to the callback.
+    int (*abort_check)(void* abort_user_data); ///< Optional abort check:
+        ///< when it returns nonzero the transfer is aborted as soon as
+        ///< possible (on every received chunk and, via the libcurl
+        ///< progress callback, periodically even while waiting for data,
+        ///< i.e. also for non-streaming interactions). May be NULL.
+    void* abort_user_data;        ///< Pointer passed to abort_check.
 };
 
 /**
@@ -136,9 +142,15 @@ void http_client_cleanup(void);
 /**
  * @brief Executes an HTTP request.
  *
+ * When the request is aborted through req->abort_check, the transfer
+ * stops as soon as possible (also while waiting for the response, i.e.
+ * for non-streaming interactions) and the body accumulated so far is
+ * still stored in resp (the caller decides whether to use it).
+ *
  * @param req Pointer to the request structure.
  * @param resp Pointer to the response structure to be populated.
- * @return 0 on success, 1 on failure (e.g., network error, memory allocation failure).
+ * @return 0 on success, 1 on failure (e.g., network error, memory
+ *         allocation failure), 2 when aborted through abort_check.
  */
 int http_request(const struct http_request_t *req, struct http_response_t *resp);
 

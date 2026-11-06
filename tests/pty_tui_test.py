@@ -142,6 +142,71 @@ def run_session(binary, scenario, expect_text, extra_patterns=(),
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def run_interrupt_session(binary):
+    """ESC interruption e2e: sends a prompt against the slowstream mock
+    scenario (one immediate chunk, then a long stall), presses ESC while
+    the reply is in flight and verifies that the turn ends promptly with
+    the partial reply and an [interrupted] marker, that the input prompt
+    comes back, and that the process still exits cleanly (/exit must not
+    be corrupted by leftover keystroke bytes)."""
+    tmp = tempfile.mkdtemp(prefix="emma-pty-interrupt-")
+    try:
+        cfg_dir = os.path.join(tmp, "emma")
+        os.makedirs(cfg_dir)
+        with open(os.path.join(cfg_dir, "config.toml"), "w") as f:
+            f.write('base_url = "http://127.0.0.1:%s/slowstream/v1"\n'
+                    % os.environ["TEST_MOCK_PORT"])
+            f.write('api_key = "test-key-123"\n')
+            f.write('model = "test-model"\n')
+            f.write("stream = true\n")
+
+        env = dict(os.environ, XDG_CONFIG_HOME=tmp, TERM="xterm")
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+
+        proc = subprocess.Popen(
+            [binary], stdin=slave, stdout=slave, stderr=slave,
+            env=env, close_fds=True)
+        os.close(slave)
+
+        output = []
+        deadline = time.time() + TIMEOUT
+        try:
+            if not read_until(master, [b"You:"], deadline, output):
+                fail("banner or input prompt never appeared", b"".join(output))
+
+            # Send a prompt; the first streamed chunk must appear.
+            os.write(master, b"Hi\r")
+            if not read_until(master, [b"Hello"], deadline, output):
+                fail("first streamed chunk never appeared", b"".join(output))
+
+            # Press ESC while the response stalls; the turn must end
+            # promptly with the partial reply kept and [interrupted].
+            os.write(master, b"\x1b")
+            if not read_until(master, [b"[interrupted]", b"You:"],
+                              deadline, output):
+                fail("ESC did not end the turn with [interrupted]",
+                     b"".join(output))
+
+            # The input must be usable again: /exit terminates cleanly
+            # (leftover watcher bytes would corrupt the command).
+            os.write(master, b"/exit\r")
+            try:
+                rc = proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.send_signal(signal.SIGKILL)
+                fail("process did not exit after ESC + /exit", b"".join(output))
+            if rc != 0:
+                fail("exit code %d after ESC + /exit" % rc, b"".join(output))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            os.close(master)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     if len(sys.argv) != 3:
         print("usage: pty_tui_test.py PORT BINARY")
@@ -192,6 +257,10 @@ def main():
     # appear in any transcript.
     run_session(binary, "aistream", b"Hello from mock!",
                 forbidden=[b"Assistant: ", b"User: "])
+
+    # ESC during an in-flight (stalled) reply: the turn must end
+    # promptly, keep the partial reply and return to the prompt.
+    run_interrupt_session(binary)
 
     print("PASS pty_tui: transcript mode keeps history in the scrollback")
     return 0
