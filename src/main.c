@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "agent_loop.h"
+#include "theme.h"
 #include "util.h"
 #include "commands.h"
 #include "http_client.h"
@@ -100,7 +101,8 @@ static int scripts_dir_default(char *buf, size_t buflen)
  * printed to stderr and all allocated strings are freed.
  */
 static int load_config(openai_config_t *config, char **scripts_dir,
-		       size_t *max_history, int *max_tool_rounds)
+		       size_t *max_history, int *max_tool_rounds,
+		       theme_t *theme)
 {
 	char path[512];
 	char errbuf[256];
@@ -185,11 +187,24 @@ static int load_config(openai_config_t *config, char **scripts_dir,
 		}
 	}
 
+	/* Optional [theme] section: overrides the built-in default colors.
+	 * Invalid values keep the defaults (theme_load warns) and never
+	 * fail the startup. */
+	if (theme_default(theme) != 0) {
+		fprintf(stderr, "emma: out of memory\n");
+		goto cleanup;
+	}
+	if (theme_load(theme, doc) != 0) {
+		fprintf(stderr, "emma: failed to load [theme] section\n");
+		goto cleanup;
+	}
+
 	rc = 0;
 cleanup:
 	toml_free(doc);
 	if (rc != 0) {
 		config_free_strings(config);
+		theme_free(theme);
 		free(*scripts_dir);
 		*scripts_dir = NULL;
 	}
@@ -314,6 +329,7 @@ int main(void) {
     tool_dispatch_ctx_t tool_ctx = {0};
     size_t max_history = DEFAULT_MAX_HISTORY;
     int max_tool_rounds = DEFAULT_MAX_TOOL_ROUNDS;
+    theme_t theme = {NULL, NULL, NULL, NULL};
     int commands_ready = 0;
     int http_ready = 0;
     int status = 1;
@@ -324,7 +340,7 @@ int main(void) {
     http_ready = 1;
 
     if (load_config(&config, &scripts_dir, &max_history,
-                    &max_tool_rounds) != 0)
+                    &max_tool_rounds, &theme) != 0)
         goto cleanup;
 
     if (session_context_init(&context, max_history) != 0)
@@ -341,8 +357,10 @@ int main(void) {
         goto cleanup;
     }
 
-    if (tui_init(&tui) != 0)
+    if (tui_init(&tui, &theme) != 0)
         goto cleanup;
+    /* The TUI owns a copy of the theme; release ours right away. */
+    theme_free(&theme);
 
     if (commands_init() != 0) {
         fprintf(stderr, "emma: failed to initialize command registry\n");
@@ -471,6 +489,7 @@ int main(void) {
 
 cleanup:
     free(scripts_dir);
+    theme_free(&theme);
     if (tui != NULL) {
         tui_free(tui);
     }

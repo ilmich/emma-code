@@ -189,6 +189,15 @@ REASONING_ALT_RESPONSE = {
 }
 
 
+# Streamed reply whose content starts with blank lines, as many chat
+# APIs emit: the transcript must not show a spurious empty row at the
+# top of the assistant section.
+LEAD_NL_STREAM_BODY = b"".join([
+    b"data: " + _ai_chunk("\n\nHello from mock!") + b"\n\n",
+    b"data: [DONE]\n\n",
+])
+
+
 # Streamed reasoning: two reasoning_content deltas followed by the usual
 # content deltas spelling "Hello from mock!" and [DONE].
 # Long multi-paragraph streaming reply: exercises incremental transcript
@@ -327,6 +336,9 @@ class MockHandler(BaseHTTPRequestHandler):
 
         elif scenario == "longstream":
             self._respond(200, LONG_STREAM_BODY, "text/event-stream")
+
+        elif scenario == "leadnl":
+            self._respond(200, LEAD_NL_STREAM_BODY, "text/event-stream")
 
         elif scenario == "reasoning":
             self._respond(200, json.dumps(REASONING_RESPONSE).encode())

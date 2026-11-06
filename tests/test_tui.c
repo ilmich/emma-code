@@ -60,10 +60,25 @@ static void test_init_fails_without_tty(void)
 				"stdin is a tty\n");
 		return;
 	}
+	/* NULL tui out-pointer is rejected without crashing. */
+	TEST_CHECK_INT_EQ(tui_init(NULL, NULL), -1);
+
 	/* Without a controlling terminal, entering raw mode must fail
-	 * cleanly (no allocation returned, no crash). */
-	TEST_CHECK_INT_EQ(tui_init(&tui), -1);
+	 * cleanly (no allocation returned, no crash). NULL theme selects
+	 * the built-in default. */
+	TEST_CHECK_INT_EQ(tui_init(&tui, NULL), -1);
 	TEST_CHECK_NULL(tui);
+
+	{
+		/* An explicit default theme must behave the same way. */
+		theme_t theme = {NULL, NULL, NULL, NULL};
+
+		TEST_CHECK_INT_EQ(theme_default(&theme), 0);
+		tui = NULL;
+		TEST_CHECK_INT_EQ(tui_init(&tui, &theme), -1);
+		TEST_CHECK_NULL(tui);
+		theme_free(&theme);
+	}
 }
 
 static void test_input_line_col(void)

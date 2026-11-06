@@ -34,6 +34,7 @@ if [ ! -s build/mock_port.txt ]; then
     exit 1
 fi
 PORT=$(cat build/mock_port.txt)
+export TEST_MOCK_PORT="$PORT"
 
 # 1. Non-streaming routing: full chat completion through the client suite.
 ./build/tests/test_openai_client || status=1

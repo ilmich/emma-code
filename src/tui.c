@@ -27,15 +27,12 @@ extern int close(int fd);
 #define OUT_BUF_SIZE       8192
 
 #define ANSI_RESET         "\033[0m"
-#define ANSI_DIM           "\033[0;2m"
-#define ANSI_BOLD_GREEN    "\033[1;32m"
-#define ANSI_BOLD_BLUE     "\033[1;34m"
-#define ANSI_BOLD_YELLOW   "\033[1;33m"
 #define ANSI_CLEAR_LINE    "\033[K"
 #define ANSI_CLEAR_END     "\033[J"
 #define ANSI_HIDE_CURSOR   "\033[?25l"
 #define ANSI_SHOW_CURSOR   "\033[?25h"
 #define INPUT_LABEL_LEN    5 /* "You: " */
+#define USER_BLOCK_PAD     1 /* columns of padding inside message blocks */
 
 typedef struct {
     char *role;
@@ -53,6 +50,8 @@ struct tui_t {
     tui_message_t *messages;
     size_t         msg_count;
     size_t         msg_cap;
+
+    theme_t        theme;
 
     char          *status;
 
@@ -216,14 +215,12 @@ static void write_str(const char *s) {
     out_write(s, strlen(s));
 }
 
-// Word-wraps plain reasoning text into dim-styled lines owned by the
-// caller (free with md_lines_free()). Returns NULL when there is nothing
-// to render. Newlines force a line break; words longer than the width
-// are hard-broken at the wrapping width.
-static md_line_t *reasoning_text_lines(const char *text, int width,
-                                       size_t *out_count) {
-    const size_t dim_len = sizeof(ANSI_DIM) - 1;
-    const size_t reset_len = sizeof(ANSI_RESET) - 1;
+// Word-wraps plain text into unstyled lines owned by the caller (free
+// with md_lines_free()). Returns NULL when there is nothing to render.
+// Newlines force a line break; words longer than the width are
+// hard-broken at the wrapping width.
+static md_line_t *wrap_plain_lines(const char *text, int width,
+                                   size_t *out_count) {
     size_t cap = 8;
     size_t count = 0;
     md_line_t *lines = NULL;
@@ -282,14 +279,13 @@ static md_line_t *reasoning_text_lines(const char *text, int width,
             seg_len--;
         }
 
-        row = malloc(dim_len + seg_len + reset_len + 1);
+        row = malloc(seg_len + 1);
         if (!row) {
             md_lines_free(lines, count);
             return NULL;
         }
-        memcpy(row, ANSI_DIM, dim_len);
-        memcpy(row + dim_len, text + start, seg_len);
-        memcpy(row + dim_len + seg_len, ANSI_RESET, reset_len + 1);
+        memcpy(row, text + start, seg_len);
+        row[seg_len] = '\0';
         lines[count].text = row;
         count++;
 
@@ -302,6 +298,38 @@ static md_line_t *reasoning_text_lines(const char *text, int width,
     }
 
     if (out_count) *out_count = count;
+    return lines;
+}
+
+// Word-wraps plain text and styles every line with an SGR prefix and a
+// reset suffix (free with md_lines_free()). A NULL style just adds the
+// reset. Returns NULL when there is nothing to render or on allocation
+// failure.
+static md_line_t *wrap_styled_lines(const char *text, const char *style,
+                                    int width, size_t *out_count) {
+    const size_t reset_len = sizeof(ANSI_RESET) - 1;
+    md_line_t *lines = wrap_plain_lines(text, width, out_count);
+    size_t count;
+    size_t style_len;
+
+    if (lines == NULL) return NULL;
+    count = (out_count != NULL) ? *out_count : 0;
+    style_len = (style != NULL) ? strlen(style) : 0;
+
+    for (size_t i = 0; i < count; i++) {
+        size_t len = strlen(lines[i].text);
+        char *row = malloc(style_len + len + reset_len + 1);
+        if (!row) {
+            md_lines_free(lines, count);
+            if (out_count) *out_count = 0;
+            return NULL;
+        }
+        memcpy(row, style, style_len);
+        memcpy(row + style_len, lines[i].text, len);
+        memcpy(row + style_len + len, ANSI_RESET, reset_len + 1);
+        free(lines[i].text);
+        lines[i].text = row;
+    }
     return lines;
 }
 
@@ -324,27 +352,23 @@ static int compute_input_box_height(tui_t *tui) {
     return lines;
 }
 
-// Wrapping width for message content: leaves room for the role label
-// written on the first line of each message.
-static int message_content_width(const tui_t *tui) {
-    int width = tui->term_cols - 12;
-    return (width >= 1) ? width : 1;
+// Columns of horizontal padding inside a message block: user messages
+// carry it inside their background block, every other role as a plain
+// left indent. The padding shrinks to zero on terminals too narrow to
+// hold it.
+static int block_pad(int term_cols) {
+    return (term_cols > 2 * USER_BLOCK_PAD) ? USER_BLOCK_PAD : 0;
 }
 
-// Role label and color for a message, matching the historical layout:
-// "     User: " (green), "Assistant: " (blue), "  System: " (yellow).
-static void message_label(const char *role, const char **label,
-                          const char **color) {
-    if (role != NULL && strcmp(role, "assistant") == 0) {
-        *color = ANSI_BOLD_BLUE;
-        *label = "Assistant";
-    } else if (role != NULL && strcmp(role, "system") == 0) {
-        *color = ANSI_BOLD_YELLOW;
-        *label = "  System";
-    } else {
-        *color = ANSI_BOLD_GREEN;
-        *label = "     User";
-    }
+// Wrapping width for message content. User messages render inside a
+// full-width background block with USER_BLOCK_PAD columns of padding per
+// side; every other role is indented by the same USER_BLOCK_PAD columns
+// (messages carry no role labels anymore).
+static int message_content_width(const tui_t *tui, const char *role) {
+    int width = tui->term_cols;
+    (void)role;
+    width -= 2 * block_pad(tui->term_cols);
+    return (width >= 1) ? width : 1;
 }
 
 // Frees an array built by build_message_lines(). NULL-safe; tolerates
@@ -357,65 +381,84 @@ static void free_message_lines(char **lines, size_t count) {
     free(lines);
 }
 
-// Builds the display lines of one message: the dim reasoning block (a
-// "reasoning" label row plus the wrapped dim text) followed by the
-// markdown-rendered content, with the role label prepended to line 0.
-// Empty or NULL content yields one (label-only) row -- except when
-// streaming is nonzero: then the label-only row is skipped entirely, so
-// the last display line is the still-growing tail of the streamed text
-// (a phantom label row would make the line before it look stable and
-// get emitted while it can still re-wrap, corrupting the transcript).
+// Skips the leading CR/LF characters of a string. Chat APIs often
+// start the assistant reply (content and reasoning alike) with blank
+// lines; rendering them would show a spurious empty row at the top of
+// every assistant section. Returns the pointer past the leading breaks
+// (NULL-safe; an all-breaks string yields the empty string).
+static const char *skip_leading_breaks(const char *s) {
+    if (s == NULL) return NULL;
+    while (*s == '\n' || *s == '\r') s++;
+    return s;
+}
+
+// Builds the display lines of one message. User messages render as a
+// full-width background block: an empty background row, the wrapped
+// plain text between USER_BLOCK_PAD columns of background padding per
+// side, and another empty background row (so the block stays visible
+// while scrolling the history). Assistant and system messages render as
+// plain text indented by USER_BLOCK_PAD columns (no background, no edge
+// rows): the styled reasoning block (italic, no label row), one empty
+// indented line, then the markdown-rendered content.
+// Empty or NULL content yields just the block edges (user) or one empty
+// row -- except when streaming is nonzero: then the trailing empty row
+// is skipped entirely, so the last display line is the still-growing
+// tail of the streamed text (a phantom row would make the line before
+// it look stable and get emitted while it can still re-wrap, corrupting
+// the transcript).
 //
 // Returns a malloc'd array of malloc'd styled lines (free with
 // free_message_lines()), or NULL when there is nothing to render or on
 // allocation failure (*out_count is 0 in both cases).
-static char **build_message_lines(const char *role, const char *content,
-                                  const char *reasoning, int width,
+static char **build_message_lines(const tui_t *tui, const char *role,
+                                  const char *content, const char *reasoning,
                                   int streaming, size_t *out_count) {
-    const char *color = NULL;
-    const char *label = NULL;
-    md_line_t *r_lines = NULL;
+    md_line_t *body_lines = NULL;
     md_line_t *md_lines = NULL;
-    size_t r_count = 0;
+    size_t body_count = 0;
     size_t md_count = 0;
-    size_t r_rows = 0;
     size_t total = 0;
-    size_t label_len;
-    char *label_buf = NULL;
     char **lines = NULL;
-    int n;
+    int is_user;
+    int width;
+    int pad;
+    int sep;
 
     if (out_count) *out_count = 0;
-    if (width < 1) width = 1;
 
-    message_label(role, &label, &color);
-    label_len = strlen(color) + strlen(label) + 2 + strlen(ANSI_RESET);
-    label_buf = malloc(label_len + 1);
-    if (!label_buf) return NULL;
-    n = snprintf(label_buf, label_len + 1, "%s%s: %s", color, label,
-                 ANSI_RESET);
-    if (n < 0 || (size_t)n >= label_len + 1) {
-        free(label_buf);
-        return NULL;
+    is_user = (role != NULL && strcmp(role, "user") == 0);
+    width = message_content_width(tui, role);
+    pad = block_pad(tui->term_cols);
+
+    if (is_user) {
+        /* User block: plain wrapped text between two empty background
+         * rows. Reasoning is never rendered for user messages. */
+        body_lines = wrap_plain_lines(content, width, &body_count);
+        total = body_count + 2;
+    } else {
+        /* Trim the leading blank lines the API prepends to assistant
+         * replies so sections do not start with an empty row. */
+        reasoning = skip_leading_breaks(reasoning);
+        content = skip_leading_breaks(content);
+        body_lines = wrap_styled_lines(reasoning, tui->theme.reasoning_on,
+                                       width, &body_count);
+        md_lines = md_render(content, width, &md_count);
+        /* One empty indented line separates the reasoning block from
+         * the content (the reasoning's own trailing newline is dropped
+         * by the wrapper, so it must be added back here). */
+        sep = (body_count > 0 && md_count > 0) ? 1 : 0;
+        total = body_count + (size_t)sep +
+                ((md_count > 0) ? md_count : (streaming ? 0 : 1));
     }
-
-    r_lines = reasoning_text_lines(reasoning, width, &r_count);
-    r_rows = (r_count > 0) ? r_count + 1 : 0;
-
-    md_lines = md_render(content, width, &md_count);
-    total = r_rows + ((md_count > 0) ? md_count
-                                     : (streaming ? 0 : 1));
     if (total == 0) {
-        free(label_buf);
-        md_lines_free(r_lines, r_count);
+        md_lines_free(body_lines, body_count);
         md_lines_free(md_lines, md_count);
         return NULL;
     }
 
     lines = malloc(total * sizeof(char *));
     if (!lines) {
-        free(label_buf);
-        md_lines_free(r_lines, r_count);
+        md_lines_free(body_lines, body_count);
         md_lines_free(md_lines, md_count);
         return NULL;
     }
@@ -424,36 +467,87 @@ static char **build_message_lines(const char *role, const char *content,
     for (size_t i = 0; i < total; i++) {
         const char *body;
         size_t body_len;
-        size_t pre = (i == 0) ? label_len : 0;
+        size_t bg_len = strlen(tui->theme.user_bg);
+        size_t clear_len = sizeof(ANSI_CLEAR_LINE) - 1;
+        size_t reset_len = sizeof(ANSI_RESET) - 1;
+        char *row;
 
-        if (r_rows > 0 && i == 0) {
-            // First row of the reasoning block: the dim block label.
-            body = ANSI_DIM "reasoning" ANSI_RESET;
-        } else if (r_rows > 0 && i < r_rows) {
-            body = (r_lines[i - 1].text != NULL) ? r_lines[i - 1].text : "";
+        if (is_user) {
+            if (i == 0 || i == total - 1) {
+                /* Empty full-width background row (block edge). */
+                body = "";
+                body_len = 0;
+            } else {
+                body = (body_lines[i - 1].text != NULL)
+                           ? body_lines[i - 1].text : "";
+                body_len = strlen(body);
+            }
+            /* Background + left padding + text + right padding, then
+             * ANSI_CLEAR_LINE fills the rest of the row with the block
+             * background. */
+            row = malloc(bg_len + 2 * (size_t)pad + body_len +
+                         clear_len + reset_len + 1);
+            if (!row) {
+                free_message_lines(lines, total);
+                md_lines_free(body_lines, body_count);
+                md_lines_free(md_lines, md_count);
+                return NULL;
+            }
+            memcpy(row, tui->theme.user_bg, bg_len);
+            for (int p = 0; p < pad; p++) row[bg_len + (size_t)p] = ' ';
+            memcpy(row + bg_len + (size_t)pad, body, body_len);
+            for (int p = 0; p < pad; p++) {
+                row[bg_len + (size_t)pad + body_len + (size_t)p] = ' ';
+            }
+            memcpy(row + bg_len + 2 * (size_t)pad + body_len,
+                   ANSI_CLEAR_LINE, clear_len);
+            memcpy(row + bg_len + 2 * (size_t)pad + body_len + clear_len,
+                   ANSI_RESET, reset_len + 1);
+            lines[i] = row;
         } else {
-            size_t j = i - r_rows;
-            body = (j < md_count && md_lines[j].text != NULL)
-                       ? md_lines[j].text : "";
-        }
-        body_len = strlen(body);
+            int is_sep = (sep && i == body_count);
 
-        lines[i] = malloc(pre + body_len + 1);
-        if (!lines[i]) {
-            free_message_lines(lines, total);
-            free(label_buf);
-            md_lines_free(r_lines, r_count);
-            md_lines_free(md_lines, md_count);
-            return NULL;
+            if (is_sep) {
+                body = "";
+            } else if (i < body_count) {
+                body = (body_lines[i].text != NULL)
+                           ? body_lines[i].text : "";
+            } else {
+                size_t j = i - body_count - (size_t)sep;
+                body = (j < md_count && md_lines[j].text != NULL)
+                           ? md_lines[j].text : "";
+            }
+            body_len = strlen(body);
+
+            /* Plain left indent instead of the user block's background
+             * padding. Empty lines stay truly empty (no trailing
+             * whitespace) -- except the reasoning/content separator,
+             * which carries the indent like every other line of the
+             * block. */
+            if (body_len == 0 && !is_sep) {
+                lines[i] = malloc(1);
+                if (!lines[i]) {
+                    free_message_lines(lines, total);
+                    md_lines_free(body_lines, body_count);
+                    md_lines_free(md_lines, md_count);
+                    return NULL;
+                }
+                lines[i][0] = '\0';
+                continue;
+            }
+            lines[i] = malloc((size_t)pad + body_len + 1);
+            if (!lines[i]) {
+                free_message_lines(lines, total);
+                md_lines_free(body_lines, body_count);
+                md_lines_free(md_lines, md_count);
+                return NULL;
+            }
+            for (int p = 0; p < pad; p++) lines[i][p] = ' ';
+            memcpy(lines[i] + pad, body, body_len + 1);
         }
-        if (pre > 0) {
-            memcpy(lines[i], label_buf, label_len);
-        }
-        memcpy(lines[i] + pre, body, body_len + 1);
     }
 
-    free(label_buf);
-    md_lines_free(r_lines, r_count);
+    md_lines_free(body_lines, body_count);
     md_lines_free(md_lines, md_count);
     if (out_count) *out_count = total;
     return lines;
@@ -473,7 +567,7 @@ static void erase_live_area(tui_t *tui) {
 // row of dashes. Moves to the next line afterwards.
 static void draw_separator(tui_t *tui) {
     if (tui->status && tui->status[0]) {
-        write_str(ANSI_BOLD_YELLOW);
+        write_str(tui->theme.status);
         write_str(" ");
         write_str(tui->status);
         write_str(ANSI_RESET);
@@ -515,7 +609,7 @@ static void draw_input_box(tui_t *tui, int input_h, int *out_vl,
     if (start_line < 0) start_line = 0;
 
     if (start_line == 0) {
-        write_str(ANSI_BOLD_GREEN);
+        write_str(tui->theme.input);
         write_str("You: ");
         write_str(ANSI_RESET);
     }
@@ -616,10 +710,11 @@ static char *current_tail(tui_t *tui) {
     char *tail = NULL;
 
     if (tui->msg_count == 0) return NULL;
-    lines = build_message_lines(tui->messages[tui->msg_count - 1].role,
+    lines = build_message_lines(tui,
+                                tui->messages[tui->msg_count - 1].role,
                                 tui->messages[tui->msg_count - 1].content,
                                 tui->messages[tui->msg_count - 1].reasoning,
-                                message_content_width(tui), 1, &count);
+                                1, &count);
     if (lines != NULL && count > 0 &&
         (size_t)tui->printed_lines < count) {
         tail = strdup(lines[count - 1]);
@@ -652,13 +747,12 @@ static void stream_sync(tui_t *tui, int flush_all) {
 
     if (tui->msg_count > 0 && tui->messages[tui->msg_count - 1].role != NULL &&
         strcmp(tui->messages[tui->msg_count - 1].role, "assistant") == 0) {
-        /* Streaming build (no phantom label row) while the message is
-         * still growing; the commit flush uses the full render. */
-        lines = build_message_lines("assistant",
+        /* Streaming build (no phantom trailing row) while the message
+         * is still growing; the commit flush uses the full render. */
+        lines = build_message_lines(tui, "assistant",
                                     tui->messages[tui->msg_count - 1].content,
                                     tui->messages[tui->msg_count - 1].reasoning,
-                                    message_content_width(tui), !flush_all,
-                                    &count);
+                                    !flush_all, &count);
     }
 
     erase_live_area(tui);
@@ -706,8 +800,8 @@ static void print_message(tui_t *tui, const char *role, const char *content,
     erase_live_area(tui);
 
     size_t count = 0;
-    char **lines = build_message_lines(role, content, reasoning,
-                                       message_content_width(tui), 0, &count);
+    char **lines = build_message_lines(tui, role, content, reasoning,
+                                       0, &count);
     if (lines != NULL) {
         for (size_t i = 0; i < count; i++) {
             write_str(lines[i]);
@@ -725,13 +819,22 @@ void tui_render(tui_t *tui) {
     out_flush();
 }
 
-int tui_init(tui_t **out) {
+int tui_init(tui_t **out, const theme_t *theme) {
     tui_t *tui = calloc(1, sizeof(tui_t));
     int rc = -1;
 
     if (!tui) {
         fprintf(stderr, "tui_init: calloc failed\n");
         return -1; /* nothing to clean up yet */
+    }
+
+    if (theme_default(&tui->theme) != 0) {
+        fprintf(stderr, "tui_init: theme_default failed\n");
+        goto cleanup;
+    }
+    if (theme != NULL && theme_copy(&tui->theme, theme) != 0) {
+        fprintf(stderr, "tui_init: theme_copy failed\n");
+        goto cleanup;
     }
 
     tui->messages = malloc(MESSAGES_INIT * sizeof(tui_message_t));
@@ -782,6 +885,7 @@ int tui_init(tui_t **out) {
 
 cleanup:
     if (tui != NULL) {
+        theme_free(&tui->theme);
         free(tui->input_buf);
         free(tui->messages);
         free(tui);
@@ -804,6 +908,7 @@ void tui_free(tui_t *tui) {
         free(tui->messages[i].content);
         free(tui->messages[i].reasoning);
     }
+    theme_free(&tui->theme);
     free(tui->messages);
     free(tui->input_buf);
     free(tui->status);

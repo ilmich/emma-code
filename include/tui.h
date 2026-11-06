@@ -3,9 +3,19 @@
 
 #include <stddef.h>
 
+#include "theme.h"
+
 typedef struct tui_t tui_t;
 
-int   tui_init(tui_t **tui);
+/**
+ * @brief Initializes the TUI with the given color theme.
+ *
+ * @param tui   Receives the TUI instance on success.
+ * @param theme Theme to paint with (copied; NULL selects the built-in
+ *              default theme).
+ * @return 0 on success, -1 on failure (no allocation returned).
+ */
+int   tui_init(tui_t **tui, const theme_t *theme);
 void  tui_free(tui_t *tui);
 void  tui_append_message(tui_t *tui, const char *role, const char *content);
 /**
@@ -15,8 +25,8 @@ void  tui_append_message(tui_t *tui, const char *role, const char *content);
  *
  * @param tui TUI instance (must not be NULL)
  * @param content Final reply text (must not be NULL)
- * @param reasoning Final reasoning text shown as a dim block above the
- *                  reply (may be NULL or empty: no block is shown)
+ * @param reasoning Final reasoning text shown as an italic block above
+ *                  the reply (may be NULL or empty: no block is shown)
  */
 void  tui_replace_assistant_message(tui_t *tui, const char *content,
                                     const char *reasoning);
@@ -33,8 +43,8 @@ void  tui_stream_append(tui_t *tui, const char *text);
 /**
  * @brief Appends a streamed reasoning delta to the assistant message.
  *
- * Reasoning text is rendered as a dim block above the reply content and
- * streamed into the terminal scrollback like content. If no streamed
+ * Reasoning text is rendered as an italic block above the reply content
+ * and streamed into the terminal scrollback like content. If no streamed
  * assistant message is in progress, one is created with empty content.
  * Called for every delta.
  */
@@ -64,7 +74,10 @@ char *tui_read_input(tui_t *tui);
 /* Geometry helpers shared by the TUI and exported for unit tests. They
  * implement the input box wrapping rules: the first line is prefixed by
  * the 5-column "You: " label (wrapping at first_width columns), later
- * lines wrap at width columns; a newline always starts a new line. */
+ * lines wrap at width columns; a newline always starts a new line.
+ * Transcript messages carry no role labels: user messages are rendered
+ * as full-width colored background blocks (1 column of padding per
+ * side), other roles as plain text indented by the same 1 column. */
 
 /**
  * @brief Computes the logical line and column of a byte index.

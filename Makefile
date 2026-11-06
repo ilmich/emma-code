@@ -28,7 +28,7 @@ SOURCES := $(SRCDIR)/main.c $(SRCDIR)/http_client.c $(SRCDIR)/openai_client.c \
 	$(SRCDIR)/session_context.c $(SRCDIR)/tui.c $(SRCDIR)/toml.c \
 	$(SRCDIR)/commands.c $(SRCDIR)/lua_scripting.c $(SRCDIR)/agent_loop.c \
 	$(SRCDIR)/util.c $(SRCDIR)/markdown.c $(SRCDIR)/tools.c \
-	$(SRCDIR)/system_prompt.c
+	$(SRCDIR)/system_prompt.c $(SRCDIR)/theme.c
 OBJECTS := $(SOURCES:$(SRCDIR)/%.c=$(BUILDDIR)/%.o)
 
 all: $(TARGET)
@@ -51,7 +51,7 @@ test: $(TESTBIN)/test_session_context $(TESTBIN)/test_openai_client \
 	$(TESTBIN)/test_http_client $(TESTBIN)/test_toml $(TESTBIN)/test_commands \
 	$(TESTBIN)/test_lua_scripting $(TESTBIN)/test_tui $(TESTBIN)/test_agent_loop \
 	$(TESTBIN)/test_util $(TESTBIN)/test_markdown $(TESTBIN)/test_tools \
-	$(TESTBIN)/test_system_prompt
+	$(TESTBIN)/test_system_prompt $(TESTBIN)/test_theme
 	$(TESTDIR)/run_tests.sh
 
 # End-to-end routing checks against the local mock OpenAI server.
@@ -109,10 +109,12 @@ $(TESTBIN)/test_commands: $(TESTDIR)/test_commands.c $(TESTDIR)/test.h $(BUILDDI
 
 $(TESTBIN)/test_lua_scripting: $(TESTDIR)/test_lua_scripting.c $(TESTDIR)/test.h \
 		$(BUILDDIR)/lua_scripting.o $(BUILDDIR)/commands.o $(BUILDDIR)/tui.o \
-		$(BUILDDIR)/markdown.o $(BUILDDIR)/util.o $(BUILDDIR)/tools.o | $(TESTBIN)
+		$(BUILDDIR)/theme.o $(BUILDDIR)/toml.o $(BUILDDIR)/markdown.o \
+		$(BUILDDIR)/util.o $(BUILDDIR)/tools.o | $(TESTBIN)
 	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_lua_scripting.c \
 		$(BUILDDIR)/lua_scripting.o $(BUILDDIR)/commands.o $(BUILDDIR)/tui.o \
-		$(BUILDDIR)/markdown.o $(BUILDDIR)/util.o $(BUILDDIR)/tools.o \
+		$(BUILDDIR)/theme.o $(BUILDDIR)/toml.o $(BUILDDIR)/markdown.o \
+		$(BUILDDIR)/util.o $(BUILDDIR)/tools.o \
 		-o $@ $(LUA_LIBS) $(CJSON_LIBS)
 
 $(TESTBIN)/test_tools: $(TESTDIR)/test_tools.c $(TESTDIR)/test.h \
@@ -121,9 +123,16 @@ $(TESTBIN)/test_tools: $(TESTDIR)/test_tools.c $(TESTDIR)/test.h \
 		$(BUILDDIR)/tools.o $(BUILDDIR)/util.o -o $@ $(CJSON_LIBS)
 
 $(TESTBIN)/test_tui: $(TESTDIR)/test_tui.c $(TESTDIR)/test.h $(BUILDDIR)/tui.o \
+		$(BUILDDIR)/theme.o $(BUILDDIR)/toml.o $(BUILDDIR)/util.o \
 		$(BUILDDIR)/markdown.o | $(TESTBIN)
 	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_tui.c $(BUILDDIR)/tui.o \
+		$(BUILDDIR)/theme.o $(BUILDDIR)/toml.o $(BUILDDIR)/util.o \
 		$(BUILDDIR)/markdown.o -o $@
+
+$(TESTBIN)/test_theme: $(TESTDIR)/test_theme.c $(TESTDIR)/test.h \
+		$(BUILDDIR)/theme.o $(BUILDDIR)/toml.o $(BUILDDIR)/util.o | $(TESTBIN)
+	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_theme.c \
+		$(BUILDDIR)/theme.o $(BUILDDIR)/toml.o $(BUILDDIR)/util.o -o $@
 
 $(TESTBIN)/test_markdown: $(TESTDIR)/test_markdown.c $(TESTDIR)/test.h \
 		$(BUILDDIR)/markdown.o | $(TESTBIN)
@@ -132,12 +141,12 @@ $(TESTBIN)/test_markdown: $(TESTDIR)/test_markdown.c $(TESTDIR)/test.h \
 
 $(TESTBIN)/test_agent_loop: $(TESTDIR)/test_agent_loop.c $(TESTDIR)/test.h \
 		$(BUILDDIR)/agent_loop.o $(BUILDDIR)/openai_client.o $(BUILDDIR)/http_client.o \
-		$(BUILDDIR)/session_context.o $(BUILDDIR)/tui.o $(BUILDDIR)/markdown.o \
-		$(BUILDDIR)/util.o | $(TESTBIN)
+		$(BUILDDIR)/session_context.o $(BUILDDIR)/tui.o $(BUILDDIR)/theme.o \
+		$(BUILDDIR)/toml.o $(BUILDDIR)/markdown.o $(BUILDDIR)/util.o | $(TESTBIN)
 	$(CC) $(CFLAGS) -I$(TESTDIR) $(TESTDIR)/test_agent_loop.c \
 		$(BUILDDIR)/agent_loop.o $(BUILDDIR)/openai_client.o $(BUILDDIR)/http_client.o \
-		$(BUILDDIR)/session_context.o $(BUILDDIR)/tui.o $(BUILDDIR)/markdown.o \
-		$(BUILDDIR)/util.o \
+		$(BUILDDIR)/session_context.o $(BUILDDIR)/tui.o $(BUILDDIR)/theme.o \
+		$(BUILDDIR)/toml.o $(BUILDDIR)/markdown.o $(BUILDDIR)/util.o \
 		-o $@ $(CURL_LIBS) $(CJSON_LIBS)
 
 .PHONY: all clean test e2e check

@@ -6,8 +6,9 @@ mock OpenAI server (tests/mock_server.py) and verifies the transcript
 rendering model:
 
   1. The conversation is printed as normal flowing output into the
-     terminal scrollback: the "User" and "Assistant" role labels and the
-     assistant reply text all appear in the byte stream.
+     terminal scrollback: messages carry no role labels; user messages
+     are full-width background blocks (default theme: blue background
+     SGR) and the assistant reply text appears in the byte stream.
   2. No full-screen clear (ESC[2J) is ever emitted: history must survive
      in the terminal's own scrollback, also after exiting.
   3. The streamed reply is rendered incrementally (the reply text arrives
@@ -64,10 +65,12 @@ def read_until(fd, patterns, deadline, output):
         output.append(chunk)
 
 
-def run_session(binary, scenario, expect_text, extra_patterns=()):
+def run_session(binary, scenario, expect_text, extra_patterns=(),
+                forbidden=()):
     """Runs one session against the given mock scenario and checks the
     transcript invariants. Returns the collected output on success."""
     extra_patterns = tuple(extra_patterns)
+    forbidden = tuple(forbidden)
     tmp = tempfile.mkdtemp(prefix="emma-pty-test-")
     try:
         cfg_dir = os.path.join(tmp, "emma")
@@ -99,10 +102,11 @@ def run_session(binary, scenario, expect_text, extra_patterns=()):
                 fail("input prompt never appeared (app crashed or hung?)",
                      b"".join(output))
 
-            # 2. Send a prompt; the user echo and the streamed reply must
-            #    appear as flowing transcript output.
+            # 2. Send a prompt; the user echo (inside its background
+            #    block, default theme: blue bg SGR) and the streamed
+            #    reply must appear as flowing transcript output.
             os.write(master, b"Hi\r")
-            patterns = [b"User", b"Assistant", expect_text]
+            patterns = [b"You:", b"\x1b[44m", b"Hi", expect_text]
             patterns.extend(extra_patterns)
             if not read_until(master, patterns, deadline, output):
                 fail("transcript incomplete after prompt", b"".join(output))
@@ -121,6 +125,10 @@ def run_session(binary, scenario, expect_text, extra_patterns=()):
             if b"\x1b[2J" in data:
                 fail("full-screen clear (ESC[2J) emitted: scrollback "
                      "history would be destroyed", data)
+            for pattern in forbidden:
+                if pattern in data:
+                    fail("forbidden pattern %r in transcript (role "
+                         "labels must be gone)" % pattern, data)
             return data
         finally:
             if proc.poll() is None:
@@ -143,18 +151,44 @@ def main():
         print("SKIP pty_tui: %s not built" % binary)
         return 0
 
-    # Short reply: the basic transcript flow.
-    run_session(binary, "aistream", b"Hello from mock!")
+    # Short reply: the basic transcript flow. Assistant lines carry the
+    # same 1-column indent as the text inside user background blocks.
+    run_session(binary, "aistream", b" Hello from mock!")
     # Long multi-paragraph reply: completed lines stream into the
-    # scrollback while the reply is still arriving.
-    run_session(binary, "longstream", b"Final short line.")
+    # scrollback while the reply is still arriving (indented too).
+    run_session(binary, "longstream", b" Final short line.")
     # Long reasoning stream in small chunks: the reasoning text must
     # appear contiguously (wrapped lines emitted at stable wrap
-    # boundaries), not as one fragment per streamed chunk.
-    run_session(binary, "longreason", b"Done.",
-                extra_patterns=[b"minimal example. First",
+    # boundaries), not as one fragment per streamed chunk, and it must
+    # be styled with the default italic (dim+italic SGR) reasoning.
+    # Reasoning lines carry the same 1-column indent as content lines:
+    # every styled reasoning line starts with one space before the
+    # SGR sequence (wrap-boundary independent), and an empty indented
+    # line separates the reasoning block from the content.
+    run_session(binary, "longreason", b" Done.",
+                extra_patterns=[b" \x1b[2;3m",
+                                b"\x1b[2;3m",
+                                b"minimal example. First",
                                 b"statement handling the",
-                                b"avoid the underflow"])
+                                b"avoid the underflow",
+                                # Empty indented line between the reasoning
+                                # block and the content: the only display
+                                # line that is exactly the pad column.
+                                b" \r\n"])
+
+    # Reply starting with blank lines (as many chat APIs emit): the
+    # assistant section must not begin with an empty row. Before the
+    # leading-breaks trim, two blank display lines were emitted right
+    # after a live-area erase (ESC[J); the message separator line sits
+    # between the sections in the byte stream, so the erase boundary is
+    # what makes this pattern unambiguous.
+    run_session(binary, "leadnl", b" Hello from mock!",
+                forbidden=[b"\x1b[J\r\n\r\n"])
+
+    # Role labels are gone everywhere: "Assistant: "/"User: " must not
+    # appear in any transcript.
+    run_session(binary, "aistream", b"Hello from mock!",
+                forbidden=[b"Assistant: ", b"User: "])
 
     print("PASS pty_tui: transcript mode keeps history in the scrollback")
     return 0
