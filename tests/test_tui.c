@@ -12,9 +12,94 @@
 #include "test.h"
 
 #include "tui.h"
+#include "version.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#define BANNER_FULL_BLOCK "\xe2\x96\x88" /* U+2588 */
+
+static void test_banner_lines(void)
+{
+	size_t count = 0;
+	char **lines = tui_banner_lines(&count);
+
+	TEST_CHECK_NOT_NULL(lines);
+	TEST_CHECK_INT_EQ((long long)count, 6); /* 5 art rows + version */
+
+	if (lines != NULL && count == 6) {
+		/* The last line is exactly the version. */
+		TEST_CHECK_STR_EQ(lines[5], "v" EMMA_VERSION);
+
+		for (size_t i = 0; i < 5; i++) {
+			const unsigned char *p =
+				(const unsigned char *)lines[i];
+
+			/* Every art row contains full blocks... */
+			TEST_CHECK_NOT_NULL(strstr(lines[i],
+						   BANNER_FULL_BLOCK));
+			/* ...and only spaces, ASCII or the UTF-8 full
+			 * block: no shadow/outline box-drawing
+			 * characters (\xe2\x95\x90..\xe2\x95\xbf). */
+			while (*p != 0) {
+				if (*p == 0xe2) {
+					TEST_CHECK_INT_EQ(p[1], 0x96);
+					TEST_CHECK_INT_EQ(p[2], 0x88);
+					p += 3;
+				} else {
+					TEST_CHECK(*p >= 0x20 && *p < 0x7f);
+					p++;
+				}
+			}
+			/* Fits an 80-column terminal (1 column per
+			 * block char, 3 bytes per block char). */
+			TEST_CHECK(strlen(lines[i]) <= 3 * 80);
+		}
+	}
+
+	if (lines != NULL) {
+		for (size_t i = 0; i < count; i++)
+			free(lines[i]);
+		free(lines);
+	}
+}
+
+static void test_banner_lines_null_count_and_copies(void)
+{
+	size_t count = 0;
+	char **a = tui_banner_lines(NULL); /* NULL out_count tolerated */
+	char **b = tui_banner_lines(&count);
+
+	TEST_CHECK_NOT_NULL(a);
+	TEST_CHECK_NOT_NULL(b);
+	TEST_CHECK_INT_EQ((long long)count, 6);
+
+	if (a != NULL && b != NULL) {
+		/* Independent allocations, identical content. */
+		TEST_CHECK(a[0] != b[0]);
+		TEST_CHECK_STR_EQ(a[0], b[0]);
+		TEST_CHECK(a[5] != b[5]);
+		TEST_CHECK_STR_EQ(a[5], b[5]);
+	}
+
+	if (a != NULL) {
+		for (size_t i = 0; i < 6; i++)
+			free(a[i]);
+		free(a);
+	}
+	if (b != NULL) {
+		for (size_t i = 0; i < count && i < 6; i++)
+			free(b[i]);
+		free(b);
+	}
+}
+
+static void test_show_banner_null_safe(void)
+{
+	/* Must not crash. */
+	tui_show_banner(NULL);
+}
 
 static void test_free_null_safe(void)
 {
@@ -201,6 +286,9 @@ int main(void)
 	TEST_RUN(test_input_line_col);
 	TEST_RUN(test_input_index_at);
 	TEST_RUN(test_stream_emit_to);
+	TEST_RUN(test_banner_lines);
+	TEST_RUN(test_banner_lines_null_count_and_copies);
+	TEST_RUN(test_show_banner_null_safe);
 
 	if (test__failures == 0)
 		printf("All tui tests passed\n");

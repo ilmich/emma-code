@@ -97,10 +97,13 @@ def run_session(binary, scenario, expect_text, extra_patterns=(),
         output = []
         deadline = time.time() + TIMEOUT
         try:
-            # 1. The prompt appears once the TUI is up (raw mode active).
-            if not read_until(master, [b"You:"], deadline, output):
-                fail("input prompt never appeared (app crashed or hung?)",
-                     b"".join(output))
+            # 1. The startup banner (block-letter art + version line)
+            #    appears before the prompt, once the TUI is up (raw
+            #    mode active). U+2588 is \xe2\x96\x88 in UTF-8.
+            if not read_until(master, [b"\xe2\x96\x88", b"v0.1.0", b"You:"],
+                              deadline, output):
+                fail("banner or input prompt never appeared "
+                     "(app crashed or hung?)", b"".join(output))
 
             # 2. Send a prompt; the user echo (inside its background
             #    block, default theme: blue bg SGR) and the streamed

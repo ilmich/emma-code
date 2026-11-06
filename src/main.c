@@ -362,6 +362,9 @@ int main(void) {
     /* The TUI owns a copy of the theme; release ours right away. */
     theme_free(&theme);
 
+    /* Startup banner: first content printed into the scrollback. */
+    tui_show_banner(tui);
+
     if (commands_init() != 0) {
         fprintf(stderr, "emma: failed to initialize command registry\n");
         goto cleanup;
@@ -445,7 +448,7 @@ int main(void) {
         /* Show the user message (with any pre_message replacement) and
          * turn on the status line; agent_loop performs no rendering. */
         tui_append_message(tui, "user", input);
-        tui_set_status(tui, "Thinking...");
+        tui_set_status(tui, "Working...");
         g_status_cleared = 0;
 
         /* Send the message and get the raw assistant reply; command

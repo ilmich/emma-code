@@ -19,6 +19,8 @@ extern int close(int fd);
 #include <signal.h>
 #include "tui.h"
 #include "markdown.h"
+#include "util.h"
+#include "version.h"
 
 #define INPUT_MAX_LINES    5
 #define INPUT_BUF_INIT     256
@@ -787,6 +789,98 @@ static void stream_sync(tui_t *tui, int flush_all) {
         draw_live_area(tui, tail);
         free(tail);
     }
+}
+
+// Startup banner art: "EMMA-CODE" in full-block letters (U+2588 and
+// spaces only, no outline/shadow characters), one row per line. Every
+// row is 51 columns wide; the trailing version line is appended at
+// print time.
+static const char *BANNER_ART[] = {
+    "█████ █   █ █   █  ███     █████ █████ ████  █████",
+    "█     ██ ██ ██ ██ █   █    █     █   █ █   █ █    ",
+    "████  █ █ █ █ █ █ █████ ██ █     █   █ █   █ ████ ",
+    "█     █   █ █   █ █   █    █     █   █ █   █ █    ",
+    "█████ █   █ █   █ █   █    █████ █████ ████  █████",
+};
+#define BANNER_ART_COUNT (sizeof BANNER_ART / sizeof BANNER_ART[0])
+#define BANNER_VERSION_MAX 64
+
+// Builds the version line ("v" EMMA_VERSION) into buf. Returns 0 on
+// success, -1 when the buffer would truncate the version string.
+static int banner_version_line(char *buf, size_t size) {
+    int n = snprintf(buf, size, "v%s", EMMA_VERSION);
+    if (n < 0 || n >= (int)size) {
+        fprintf(stderr, "tui_banner: version string truncated\n");
+        return -1;
+    }
+    return 0;
+}
+
+char **tui_banner_lines(size_t *out_count) {
+    char **lines = NULL;
+    char version[BANNER_VERSION_MAX];
+    size_t count = 0;
+
+    if (out_count) *out_count = 0;
+
+    if (banner_version_line(version, sizeof version) != 0)
+        return NULL;
+
+    lines = malloc((BANNER_ART_COUNT + 1) * sizeof(char *));
+    if (lines == NULL) {
+        fprintf(stderr, "tui_banner_lines: malloc failed\n");
+        return NULL;
+    }
+
+    for (size_t i = 0; i < BANNER_ART_COUNT; i++) {
+        lines[count] = util_strdup(BANNER_ART[i]);
+        if (lines[count] == NULL) {
+            fprintf(stderr, "tui_banner_lines: out of memory\n");
+            goto cleanup;
+        }
+        count++;
+    }
+    lines[count] = util_strdup(version);
+    if (lines[count] == NULL) {
+        fprintf(stderr, "tui_banner_lines: out of memory\n");
+        goto cleanup;
+    }
+    count++;
+
+    if (out_count) *out_count = count;
+    return lines;
+
+cleanup:
+    free_message_lines(lines, count);
+    return NULL;
+}
+
+void tui_show_banner(tui_t *tui) {
+    size_t count = 0;
+    char **lines = NULL;
+
+    if (!tui) return;
+
+    if (tui->streaming_active) stream_sync(tui, 1);
+
+    erase_live_area(tui);
+
+    lines = tui_banner_lines(&count);
+    if (lines != NULL) {
+        for (size_t i = 0; i < count; i++) {
+            int is_version = (i + 1 == count);
+            if (is_version && tui->theme.status != NULL)
+                write_str(tui->theme.status);
+            write_str(lines[i]);
+            if (is_version && tui->theme.status != NULL)
+                write_str(ANSI_RESET);
+            write_str("\r\n");
+        }
+        free_message_lines(lines, count);
+    }
+    write_str("\r\n"); /* blank line between banner and transcript */
+    draw_live_area(tui, NULL);
+    out_flush();
 }
 
 // Prints one committed message into the transcript (scrollback): flushes

@@ -115,4 +115,31 @@ int   tui_input_index_at(const char *buf, size_t len, int first_width,
  */
 int   tui_stream_emit_to(int total_lines, int flush_all);
 
+/**
+ * @brief Builds the startup banner lines (block-letter art spelling
+ *        "EMMA-CODE" plus the trailing version line "v" EMMA_VERSION).
+ *
+ * The lines are plain text (no SGR sequences): the caller decides how
+ * to style them. Every line fits an 80-column terminal.
+ *
+ * @param out_count Receives the number of returned lines (may be NULL;
+ *                  set to 0 on failure).
+ * @return A malloc'd array of malloc'd lines owned by the caller
+ *         (free each entry and the array itself), or NULL on
+ *         allocation failure (*out_count is 0 in that case).
+ */
+char **tui_banner_lines(size_t *out_count);
+
+/**
+ * @brief Prints the startup banner into the transcript scrollback.
+ *
+ * Writes the banner lines (from tui_banner_lines()) without wrapping,
+ * followed by a blank line, then repaints the live area. The version
+ * line is styled with the theme's status color. A NULL @p tui is a
+ * no-op; allocation failures skip the banner without side effects.
+ *
+ * @param tui TUI instance (may be NULL)
+ */
+void  tui_show_banner(tui_t *tui);
+
 #endif
