@@ -191,6 +191,47 @@ REASONING_ALT_RESPONSE = {
 
 # Streamed reasoning: two reasoning_content deltas followed by the usual
 # content deltas spelling "Hello from mock!" and [DONE].
+# Long multi-paragraph streaming reply: exercises incremental transcript
+# emission (completed lines flow into the scrollback while streaming).
+_LONG_TEXT = ("First paragraph with several words to wrap around the "
+              "terminal width nicely.\n\nSecond paragraph follows after a "
+              "blank line, also long enough to wrap into multiple display "
+              "lines.\n\n- bullet one\n- bullet two\n\nFinal short line.")
+LONG_STREAM_BODY = b"".join(
+    [b"data: " + _ai_chunk(part) + b"\n\n"
+     for part in (_LONG_TEXT[i:i + 24]
+                  for i in range(0, len(_LONG_TEXT), 24))]
+    + [b"data: [DONE]\n\n"])
+
+# Long reasoning stream: many small reasoning chunks followed by a
+# short content chunk. Regression coverage for the transcript-mode
+# reasoning rendering: the reasoning text must appear contiguously in
+# the output (wrapped lines emitted at stable wrap boundaries), not as
+# one fragment per streamed chunk.
+_LONG_REASONING = ("Okay, the user wants a minimal example. First I will "
+                   "check the function signature, then I will write the "
+                   "statement handling the NULL case, and otherwise return "
+                   "the computed value. Finally I add error handling for "
+                   "the allocation failure path. In the present form the "
+                   "loop index must start at one to avoid the underflow.")
+
+def _long_reason_body():
+    out = b""
+    for i in range(0, len(_LONG_REASONING), 12):
+        c = json.dumps({"id": "x", "object": "chat.completion.chunk",
+                        "choices": [{"index": 0,
+                                     "delta": {"reasoning_content":
+                                               _LONG_REASONING[i:i + 12]},
+                                     "finish_reason": None}]}).encode()
+        out += b"data: " + c + b"\n\n"
+    c = json.dumps({"id": "x", "object": "chat.completion.chunk",
+                    "choices": [{"index": 0, "delta": {"content": "Done."},
+                                 "finish_reason": None}]}).encode()
+    out += b"data: " + c + b"\n\ndata: [DONE]\n\n"
+    return out
+
+LONG_REASON_BODY = _long_reason_body()
+
 REASONING_STREAM_BODY = b"".join([
     b"data: " + _tool_chunk({"reasoning_content": "Step one."}) + b"\n\n",
     b"data: " + _tool_chunk({"reasoning_content": " Step two."}) + b"\n\n",
@@ -284,6 +325,9 @@ class MockHandler(BaseHTTPRequestHandler):
         elif scenario == "aistream":
             self._respond(200, AI_STREAM_BODY, "text/event-stream")
 
+        elif scenario == "longstream":
+            self._respond(200, LONG_STREAM_BODY, "text/event-stream")
+
         elif scenario == "reasoning":
             self._respond(200, json.dumps(REASONING_RESPONSE).encode())
 
@@ -292,6 +336,9 @@ class MockHandler(BaseHTTPRequestHandler):
 
         elif scenario == "ssereasoning":
             self._respond(200, REASONING_STREAM_BODY, "text/event-stream")
+
+        elif scenario == "longreason":
+            self._respond(200, LONG_REASON_BODY, "text/event-stream")
 
         elif scenario == "toolcall":
             self._respond(200, json.dumps(TOOL_CALL_RESPONSE).encode())

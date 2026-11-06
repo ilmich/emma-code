@@ -460,7 +460,9 @@ static void test_stream_server_error_500(void)
 
 static void test_stream_unreachable_server(void)
 {
-	openai_config_t cfg;
+	/* Zero-initialized: send_request reads tools_json, which must not
+	 * be a garbage pointer (crashed at -O2 before the fix). */
+	openai_config_t cfg = {0};
 	openai_message_t msgs[1] = {0};
 	openai_response_t resp = {0};
 
@@ -480,7 +482,9 @@ static void test_stream_unreachable_server(void)
 
 static void test_chat_completion_unreachable_server(void)
 {
-	openai_config_t cfg;
+	/* Zero-initialized: send_request reads tools_json, which must not
+	 * be a garbage pointer (crashed at -O2 before the fix). */
+	openai_config_t cfg = {0};
 	openai_message_t msgs[1] = {0};
 	openai_response_t resp = {0};
 

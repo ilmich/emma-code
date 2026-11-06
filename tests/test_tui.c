@@ -13,6 +13,7 @@
 
 #include "tui.h"
 
+#include <string.h>
 #include <unistd.h>
 
 static void test_free_null_safe(void)
@@ -65,11 +66,126 @@ static void test_init_fails_without_tty(void)
 	TEST_CHECK_NULL(tui);
 }
 
+static void test_input_line_col(void)
+{
+	int line = -1, col = -1;
+
+	/* Empty buffer: everything is on line 0, column 0. */
+	tui_input_line_col("", 0, 0, 5, 10, &line, &col);
+	TEST_CHECK_INT_EQ(line, 0);
+	TEST_CHECK_INT_EQ(col, 0);
+
+	/* Plain single-line text. */
+	tui_input_line_col("abc", 3, 2, 5, 10, &line, &col);
+	TEST_CHECK_INT_EQ(line, 0);
+	TEST_CHECK_INT_EQ(col, 2);
+	tui_input_line_col("abc", 3, 3, 5, 10, &line, &col);
+	TEST_CHECK_INT_EQ(line, 0);
+	TEST_CHECK_INT_EQ(col, 3);
+
+	/* Newlines split lines; the index after the newline is line 1. */
+	tui_input_line_col("a\nb", 3, 2, 5, 10, &line, &col);
+	TEST_CHECK_INT_EQ(line, 1);
+	TEST_CHECK_INT_EQ(col, 0);
+	tui_input_line_col("a\nb", 3, 3, 5, 10, &line, &col);
+	TEST_CHECK_INT_EQ(line, 1);
+	TEST_CHECK_INT_EQ(col, 1);
+
+	/* Trailing newline: the empty last line counts. */
+	tui_input_line_col("a\n", 2, 2, 5, 10, &line, &col);
+	TEST_CHECK_INT_EQ(line, 1);
+	TEST_CHECK_INT_EQ(col, 0);
+
+	/* Wrapping: first line wraps at first_width, later lines at width. */
+	tui_input_line_col("abcdefghij", 10, 5, 5, 10, &line, &col);
+	TEST_CHECK_INT_EQ(line, 1);
+	TEST_CHECK_INT_EQ(col, 0);
+	tui_input_line_col("abcdefghij", 10, 7, 5, 10, &line, &col);
+	TEST_CHECK_INT_EQ(line, 1);
+	TEST_CHECK_INT_EQ(col, 2);
+	tui_input_line_col("abcdefghij", 10, 10, 5, 10, &line, &col);
+	TEST_CHECK_INT_EQ(line, 1);
+	TEST_CHECK_INT_EQ(col, 5);
+
+	/* A newline right at the wrap boundary: the wrap starts a line and
+	 * the newline starts another. */
+	tui_input_line_col("abcde\nx", 7, 5, 5, 10, &line, &col);
+	TEST_CHECK_INT_EQ(line, 1);
+	TEST_CHECK_INT_EQ(col, 0);
+	tui_input_line_col("abcde\nx", 7, 6, 5, 10, &line, &col);
+	TEST_CHECK_INT_EQ(line, 2);
+	TEST_CHECK_INT_EQ(col, 0);
+	tui_input_line_col("abcde\nx", 7, 7, 5, 10, &line, &col);
+	TEST_CHECK_INT_EQ(line, 2);
+	TEST_CHECK_INT_EQ(col, 1);
+
+	/* Index clamped to len; NULL out-params tolerated. */
+	tui_input_line_col("abc", 3, 99, 5, 10, NULL, NULL);
+	tui_input_line_col("abc", 3, 99, 5, 10, &line, &col);
+	TEST_CHECK_INT_EQ(line, 0);
+	TEST_CHECK_INT_EQ(col, 3);
+}
+
+static void test_input_index_at(void)
+{
+	size_t idx = 999;
+
+	/* Round-trips within a line. */
+	TEST_CHECK_INT_EQ(tui_input_index_at("abc", 3, 5, 10, 0, 2, &idx), 0);
+	TEST_CHECK_INT_EQ((long long)idx, 2);
+
+	/* Column clamped to the line's end (before the newline). */
+	TEST_CHECK_INT_EQ(tui_input_index_at("a\nb", 3, 5, 10, 0, 99, &idx), 0);
+	TEST_CHECK_INT_EQ((long long)idx, 1);
+	TEST_CHECK_INT_EQ(tui_input_index_at("a\nb", 3, 5, 10, 1, 0, &idx), 0);
+	TEST_CHECK_INT_EQ((long long)idx, 2);
+	TEST_CHECK_INT_EQ(tui_input_index_at("a\nb", 3, 5, 10, 1, 99, &idx), 0);
+	TEST_CHECK_INT_EQ((long long)idx, 3);
+
+	/* Wrap boundary: column == width lands on the next line. */
+	TEST_CHECK_INT_EQ(tui_input_index_at("abcdefgh", 8, 5, 10, 1, 0, &idx),
+			  0);
+	TEST_CHECK_INT_EQ((long long)idx, 5);
+	TEST_CHECK_INT_EQ(tui_input_index_at("abcdefgh", 8, 5, 10, 1, 5, &idx),
+			  0);
+	TEST_CHECK_INT_EQ((long long)idx, 10 > 8 ? 8 : 10); /* clamped to len */
+
+	/* Empty last line (trailing newline) maps to len. */
+	TEST_CHECK_INT_EQ(tui_input_index_at("a\n", 2, 5, 10, 1, 0, &idx), 0);
+	TEST_CHECK_INT_EQ((long long)idx, 2);
+
+	/* Out-of-range lines fail without touching the output. */
+	idx = 123;
+	TEST_CHECK_INT_EQ(tui_input_index_at("abc", 3, 5, 10, 1, 0, &idx), -1);
+	TEST_CHECK_INT_EQ((long long)idx, 123);
+	TEST_CHECK_INT_EQ(tui_input_index_at("abc", 3, 5, 10, -1, 0, &idx), -1);
+	TEST_CHECK_INT_EQ(tui_input_index_at(NULL, 0, 5, 10, 0, 0, &idx), -1);
+}
+
+static void test_stream_emit_to(void)
+{
+	/* Nothing to emit for an empty or single-line message: the only
+	 * line is the trailing one and stays in the live area. */
+	TEST_CHECK_INT_EQ(tui_stream_emit_to(0, 0), -1);
+	TEST_CHECK_INT_EQ(tui_stream_emit_to(1, 0), -1);
+
+	/* Without flush: all lines but the trailing one are emitted. */
+	TEST_CHECK_INT_EQ(tui_stream_emit_to(3, 0), 1);
+	TEST_CHECK_INT_EQ(tui_stream_emit_to(5, 0), 3);
+
+	/* With flush: everything, including the trailing line. */
+	TEST_CHECK_INT_EQ(tui_stream_emit_to(1, 1), 0);
+	TEST_CHECK_INT_EQ(tui_stream_emit_to(3, 1), 2);
+}
+
 int main(void)
 {
 	TEST_RUN(test_free_null_safe);
 	TEST_RUN(test_api_null_args_safe);
 	TEST_RUN(test_init_fails_without_tty);
+	TEST_RUN(test_input_line_col);
+	TEST_RUN(test_input_index_at);
+	TEST_RUN(test_stream_emit_to);
 
 	if (test__failures == 0)
 		printf("All tui tests passed\n");

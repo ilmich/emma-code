@@ -55,7 +55,7 @@ test: $(TESTBIN)/test_session_context $(TESTBIN)/test_openai_client \
 	$(TESTDIR)/run_tests.sh
 
 # End-to-end routing checks against the local mock OpenAI server.
-e2e: $(TESTBIN)/test_openai_client $(TESTBIN)/test_agent_loop
+e2e: $(TARGET) $(TESTBIN)/test_openai_client $(TESTBIN)/test_agent_loop
 	$(TESTDIR)/e2e.sh
 
 # Enforce the repo layout rules: every src/*.c (except main.c) must have a

@@ -101,6 +101,15 @@ if command -v curl >/dev/null 2>&1; then
     esac
 fi
 
+# 5. Transcript-mode TUI under a pty: the conversation must flow into
+#    the terminal scrollback (no full-screen clears) with both role
+#    labels visible, and the process must exit cleanly.
+if [ -x ./emma-code ]; then
+    python3 tests/pty_tui_test.py "$PORT" ./emma-code || status=1
+else
+    echo "SKIP e2e pty: ./emma-code not built" >&2
+fi
+
 if [ "$status" -eq 0 ]; then
     echo "e2e: OK"
 fi

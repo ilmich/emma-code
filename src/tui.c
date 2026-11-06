@@ -31,11 +31,11 @@ extern int close(int fd);
 #define ANSI_BOLD_GREEN    "\033[1;32m"
 #define ANSI_BOLD_BLUE     "\033[1;34m"
 #define ANSI_BOLD_YELLOW   "\033[1;33m"
-#define ANSI_CLEAR_SCREEN  "\033[2J"
-#define ANSI_CURSOR_HOME   "\033[H"
 #define ANSI_CLEAR_LINE    "\033[K"
+#define ANSI_CLEAR_END     "\033[J"
 #define ANSI_HIDE_CURSOR   "\033[?25l"
 #define ANSI_SHOW_CURSOR   "\033[?25h"
+#define INPUT_LABEL_LEN    5 /* "You: " */
 
 typedef struct {
     char *role;
@@ -61,7 +61,21 @@ struct tui_t {
     size_t         input_cap;
     size_t         input_cursor;
 
-    int            scroll_offset;
+    /* Transcript-mode state: finished messages are printed once into the
+     * normal terminal scrollback; only the separator row and the input
+     * box (the "live area") are repainted in place at the bottom.
+     *
+     * streaming_active: the last message is an assistant message still
+     * being built from streamed deltas.
+     * printed_lines: display lines of that message already emitted to
+     * the transcript; the trailing (still growing) line stays in the
+     * live area until the next delta or the commit.
+     * cursor_row: rows below the live-area top the terminal cursor sits
+     * on after the last paint; lets the next erase use relative movement
+     * only (the absolute scroll position is unknown). */
+    int            streaming_active;
+    int            printed_lines;
+    int            cursor_row;
 };
 
 static tui_t *g_tui = NULL;
@@ -177,11 +191,24 @@ static void out_write(const char *s, size_t len) {
     out_len += len;
 }
 
-static void cursor_move(int row, int col) {
-    char buf[32];
-    int n = snprintf(buf, sizeof(buf), "\033[%d;%dH", row, col);
-    if (n > 0 && n < (int)sizeof(buf)) {
-        out_write(buf, (size_t)n);
+// Cursor-relative movement helpers: the transcript model never knows the
+// absolute scroll position, so the live area is erased and redrawn using
+// only relative moves from the recorded cursor row.
+static void cursor_up(int n) {
+    char buf[16];
+    if (n <= 0) return;
+    int m = snprintf(buf, sizeof(buf), "\033[%dA", n);
+    if (m > 0 && m < (int)sizeof(buf)) {
+        out_write(buf, (size_t)m);
+    }
+}
+
+static void cursor_right(int n) {
+    char buf[16];
+    if (n <= 0) return;
+    int m = snprintf(buf, sizeof(buf), "\033[%dC", n);
+    if (m > 0 && m < (int)sizeof(buf)) {
+        out_write(buf, (size_t)m);
     }
 }
 
@@ -278,60 +305,16 @@ static md_line_t *reasoning_text_lines(const char *text, int width,
     return lines;
 }
 
-// Number of pre-wrapped markdown lines a message renders to. Empty or
-// NULL content still occupies one (label) row.
-static int count_lines_for_content(const char *content, int width) {
-    size_t count = 0;
-    md_line_t *lines = md_render(content, width, &count);
-    md_lines_free(lines, count);
-    return (count > 0) ? (int)count : 1;
-}
-
-// Number of rows the reasoning block of a message renders to: one dim
-// label row plus the wrapped dim reasoning text. Zero when the message
-// carries no reasoning.
-static int count_lines_for_reasoning(const char *reasoning, int width) {
-    size_t count = 0;
-    md_line_t *lines;
-
-    if (reasoning == NULL || reasoning[0] == '\0') return 0;
-    lines = reasoning_text_lines(reasoning, width, &count);
-    md_lines_free(lines, count);
-    return (int)count + 1; /* + label row */
-}
-
 static int count_input_lines(tui_t *tui) {
-    int label_len = 5; /* "You: " is 5 columns */
-    int first_line_width = tui->term_cols - label_len;
-    if (first_line_width < 1) first_line_width = 1;
+    int first_width = tui->term_cols - INPUT_LABEL_LEN;
+    int line = 0, col = 0;
 
+    if (first_width < 1) first_width = 1;
     if (tui->input_len == 0) return 1;
 
-    int lines = 1;
-    int col = 0;
-    int first_line = 1;
-    int effective_width = first_line_width;
-
-    for (size_t i = 0; i < tui->input_len; i++) {
-        char c = tui->input_buf[i];
-        if (c == '\n') {
-            lines++;
-            col = 0;
-            first_line = 0;
-            effective_width = tui->term_cols;
-        } else {
-            col++;
-            if (col >= effective_width) {
-                lines++;
-                col = 0;
-                if (first_line) {
-                    first_line = 0;
-                    effective_width = tui->term_cols;
-                }
-            }
-        }
-    }
-    return lines;
+    tui_input_line_col(tui->input_buf, tui->input_len, tui->input_len,
+                       first_width, tui->term_cols, &line, &col);
+    return line + 1;
 }
 
 static int compute_input_box_height(tui_t *tui) {
@@ -341,224 +324,212 @@ static int compute_input_box_height(tui_t *tui) {
     return lines;
 }
 
-static int compute_history_rows(tui_t *tui) {
-    int input_h = compute_input_box_height(tui);
-    int history_rows = tui->term_rows - input_h - 1;
-    if (history_rows < 1) history_rows = 1;
-    return history_rows;
+// Wrapping width for message content: leaves room for the role label
+// written on the first line of each message.
+static int message_content_width(const tui_t *tui) {
+    int width = tui->term_cols - 12;
+    return (width >= 1) ? width : 1;
 }
 
-static int total_rendered_lines(tui_t *tui) {
-    int total = 0;
-    int role_prefix = 12;
-    int content_width = tui->term_cols - role_prefix;
-    if (content_width < 1) content_width = 1;
-    for (size_t i = 0; i < tui->msg_count; i++) {
-        total += count_lines_for_reasoning(tui->messages[i].reasoning,
-                                           content_width);
-        total += count_lines_for_content(tui->messages[i].content, content_width);
+// Role label and color for a message, matching the historical layout:
+// "     User: " (green), "Assistant: " (blue), "  System: " (yellow).
+static void message_label(const char *role, const char **label,
+                          const char **color) {
+    if (role != NULL && strcmp(role, "assistant") == 0) {
+        *color = ANSI_BOLD_BLUE;
+        *label = "Assistant";
+    } else if (role != NULL && strcmp(role, "system") == 0) {
+        *color = ANSI_BOLD_YELLOW;
+        *label = "  System";
+    } else {
+        *color = ANSI_BOLD_GREEN;
+        *label = "     User";
     }
-    return total;
 }
 
-static void render_history(tui_t *tui) {
-    int history_rows = compute_history_rows(tui);
-    int role_prefix  = 12;
-    int content_width = tui->term_cols - role_prefix;
-    if (content_width < 1) content_width = 1;
+// Frees an array built by build_message_lines(). NULL-safe; tolerates
+// NULL entries.
+static void free_message_lines(char **lines, size_t count) {
+    if (!lines) return;
+    for (size_t i = 0; i < count; i++) {
+        free(lines[i]);
+    }
+    free(lines);
+}
 
-    int total = total_rendered_lines(tui);
-    int max_scroll = total - history_rows;
-    if (max_scroll < 0) max_scroll = 0;
-    if (tui->scroll_offset > max_scroll) tui->scroll_offset = max_scroll;
+// Builds the display lines of one message: the dim reasoning block (a
+// "reasoning" label row plus the wrapped dim text) followed by the
+// markdown-rendered content, with the role label prepended to line 0.
+// Empty or NULL content yields one (label-only) row -- except when
+// streaming is nonzero: then the label-only row is skipped entirely, so
+// the last display line is the still-growing tail of the streamed text
+// (a phantom label row would make the line before it look stable and
+// get emitted while it can still re-wrap, corrupting the transcript).
+//
+// Returns a malloc'd array of malloc'd styled lines (free with
+// free_message_lines()), or NULL when there is nothing to render or on
+// allocation failure (*out_count is 0 in both cases).
+static char **build_message_lines(const char *role, const char *content,
+                                  const char *reasoning, int width,
+                                  int streaming, size_t *out_count) {
+    const char *color = NULL;
+    const char *label = NULL;
+    md_line_t *r_lines = NULL;
+    md_line_t *md_lines = NULL;
+    size_t r_count = 0;
+    size_t md_count = 0;
+    size_t r_rows = 0;
+    size_t total = 0;
+    size_t label_len;
+    char *label_buf = NULL;
+    char **lines = NULL;
+    int n;
 
-    int lines_to_skip = tui->scroll_offset;
-    int screen_row = 1;
+    if (out_count) *out_count = 0;
+    if (width < 1) width = 1;
 
-    for (size_t i = 0; i < tui->msg_count && screen_row <= history_rows; i++) {
-        const char *role    = tui->messages[i].role;
-        const char *content = tui->messages[i].content;
-        const char *reasoning = tui->messages[i].reasoning;
+    message_label(role, &label, &color);
+    label_len = strlen(color) + strlen(label) + 2 + strlen(ANSI_RESET);
+    label_buf = malloc(label_len + 1);
+    if (!label_buf) return NULL;
+    n = snprintf(label_buf, label_len + 1, "%s%s: %s", color, label,
+                 ANSI_RESET);
+    if (n < 0 || (size_t)n >= label_len + 1) {
+        free(label_buf);
+        return NULL;
+    }
 
-        // Reasoning block: one dim label row plus the wrapped dim text.
-        size_t r_count = 0;
-        md_line_t *r_lines = reasoning_text_lines(reasoning, content_width,
-                                                  &r_count);
-        int r_rows = (r_count > 0) ? (int)r_count + 1 : 0;
+    r_lines = reasoning_text_lines(reasoning, width, &r_count);
+    r_rows = (r_count > 0) ? r_count + 1 : 0;
 
-        size_t md_count = 0;
-        int msg_lines = r_rows +
-            count_lines_for_content(content, content_width);
-
-        if (lines_to_skip >= msg_lines) {
-            lines_to_skip -= msg_lines;
-            md_lines_free(r_lines, r_count);
-            continue;
-        }
-
-        const char *color = ANSI_BOLD_GREEN;
-        const char *label = "     User";
-        if (strcmp(role, "assistant") == 0) {
-            color = ANSI_BOLD_BLUE;
-            label = "Assistant";
-        } else if (strcmp(role, "system") == 0) {
-            color = ANSI_BOLD_YELLOW;
-            label = "  System";
-        }
-
-        // Render the message content into pre-wrapped, styled markdown
-        // lines. An empty message still shows its label on one row.
-        md_line_t *lines = md_render(content, content_width, &md_count);
-
-        int line_in_msg = lines_to_skip; // first visible message line
-        lines_to_skip = 0;               // consumed by this message
-
-        cursor_move(screen_row, 1);
-        write_str(ANSI_CLEAR_LINE);
-
-        // Always label the first visible row of the message, even when the
-        // upper part of the message is scrolled away.
-        write_str(color);
-        write_str(label);
-        write_str(": ");
-        write_str(ANSI_RESET);
-
-        for (int li = line_in_msg;
-             li < msg_lines && screen_row <= history_rows; li++) {
-            if (li > line_in_msg) {
-                // Erase stale characters from a previous frame on this row.
-                write_str(ANSI_CLEAR_LINE);
-                screen_row++;
-                if (screen_row <= history_rows) {
-                    cursor_move(screen_row, 1);
-                    write_str(ANSI_CLEAR_LINE);
-                }
-            }
-            if (li < r_rows) {
-                // Reasoning block: first row is the dim label, the rest
-                // are the pre-styled dim reasoning lines.
-                if (li == 0) {
-                    write_str(ANSI_DIM);
-                    write_str("reasoning");
-                    write_str(ANSI_RESET);
-                } else if (r_lines[li - 1].text) {
-                    write_str(r_lines[li - 1].text);
-                }
-            } else if ((size_t)(li - r_rows) < md_count &&
-                       lines[li - r_rows].text) {
-                write_str(lines[li - r_rows].text);
-            }
-        }
-
-        // Clear from here so leftovers from a previous frame are erased.
-        write_str(ANSI_CLEAR_LINE);
-
-        screen_row++;
+    md_lines = md_render(content, width, &md_count);
+    total = r_rows + ((md_count > 0) ? md_count
+                                     : (streaming ? 0 : 1));
+    if (total == 0) {
+        free(label_buf);
         md_lines_free(r_lines, r_count);
-        md_lines_free(lines, md_count);
+        md_lines_free(md_lines, md_count);
+        return NULL;
     }
 
-    while (screen_row <= history_rows) {
-        cursor_move(screen_row, 1);
-        write_str(ANSI_CLEAR_LINE);
-        screen_row++;
+    lines = malloc(total * sizeof(char *));
+    if (!lines) {
+        free(label_buf);
+        md_lines_free(r_lines, r_count);
+        md_lines_free(md_lines, md_count);
+        return NULL;
     }
+    memset(lines, 0, total * sizeof(char *));
+
+    for (size_t i = 0; i < total; i++) {
+        const char *body;
+        size_t body_len;
+        size_t pre = (i == 0) ? label_len : 0;
+
+        if (r_rows > 0 && i == 0) {
+            // First row of the reasoning block: the dim block label.
+            body = ANSI_DIM "reasoning" ANSI_RESET;
+        } else if (r_rows > 0 && i < r_rows) {
+            body = (r_lines[i - 1].text != NULL) ? r_lines[i - 1].text : "";
+        } else {
+            size_t j = i - r_rows;
+            body = (j < md_count && md_lines[j].text != NULL)
+                       ? md_lines[j].text : "";
+        }
+        body_len = strlen(body);
+
+        lines[i] = malloc(pre + body_len + 1);
+        if (!lines[i]) {
+            free_message_lines(lines, total);
+            free(label_buf);
+            md_lines_free(r_lines, r_count);
+            md_lines_free(md_lines, md_count);
+            return NULL;
+        }
+        if (pre > 0) {
+            memcpy(lines[i], label_buf, label_len);
+        }
+        memcpy(lines[i] + pre, body, body_len + 1);
+    }
+
+    free(label_buf);
+    md_lines_free(r_lines, r_count);
+    md_lines_free(md_lines, md_count);
+    if (out_count) *out_count = total;
+    return lines;
 }
 
-static void render_separator(tui_t *tui) {
-    int sep_row = compute_history_rows(tui) + 1;
-    cursor_move(sep_row, 1);
-    write_str(ANSI_CLEAR_LINE);
+// Erases the live area (any in-progress streaming line, the separator
+// row and the input box) using movement relative to the recorded cursor
+// row, leaving the cursor at its top on a cleared screen position.
+static void erase_live_area(tui_t *tui) {
+    write_str("\r");
+    cursor_up(tui->cursor_row);
+    write_str(ANSI_CLEAR_END);
+    tui->cursor_row = 0;
+}
 
+// Draws the separator row: the status text when set, otherwise a full
+// row of dashes. Moves to the next line afterwards.
+static void draw_separator(tui_t *tui) {
     if (tui->status && tui->status[0]) {
         write_str(ANSI_BOLD_YELLOW);
         write_str(" ");
         write_str(tui->status);
         write_str(ANSI_RESET);
-        int used = 1 + (int)strlen(tui->status);
-        int remaining = tui->term_cols - used;
-        for (int i = 0; i < remaining; i++) {
-            write_str(" ");
-        }
+        write_str(ANSI_CLEAR_LINE);
     } else {
         for (int i = 0; i < tui->term_cols; i++) {
             char ch[2] = {SEPARATOR_CHAR, 0};
             write_str(ch);
         }
     }
+    write_str("\r\n");
 }
 
-static void render_input(tui_t *tui) {
-    int history_rows = compute_history_rows(tui);
-    int input_h      = compute_input_box_height(tui);
-    int input_start  = history_rows + 2;
-    int label_len    = 5; /* "You: " is 5 columns */
-    int first_width  = tui->term_cols - label_len;
+// Draws the visible window of the multi-line input box at the current
+// cursor position (column 1). Outputs the 0-based visible line and column
+// of the input cursor (the column includes the label offset on the first
+// visible row) so the caller can place the terminal cursor afterwards.
+static void draw_input_box(tui_t *tui, int input_h, int *out_vl,
+                           int *out_col0) {
+    int first_width = tui->term_cols - INPUT_LABEL_LEN;
+    int cursor_line = 0, cursor_col = 0;
+    int start_line;
+    int line_idx = 0, col = 0, first_line = 1;
+    int effective_width;
+    int prev_rel = -1;
+    int vl = 0, col0 = 0;
+    const char *buf = tui->input_buf;
+
     if (first_width < 1) first_width = 1;
+    effective_width = first_width;
 
-    for (int r = input_start; r < input_start + input_h; r++) {
-        cursor_move(r, 1);
-        write_str(ANSI_CLEAR_LINE);
-    }
-
-    // Logical line the cursor sits on, using the same wrapping rules as
-    // count_input_lines(), so it can be kept inside the visible box.
-    int cursor_line = 0;
-    {
-        int col = 0;
-        int first_line = 1;
-        int effective_width = first_width;
-        for (size_t i = 0; i < tui->input_cursor && i < tui->input_len; i++) {
-            char c = tui->input_buf[i];
-            if (c == '\n') {
-                cursor_line++;
-                col = 0;
-                first_line = 0;
-                effective_width = tui->term_cols;
-            } else {
-                col++;
-                if (col >= effective_width) {
-                    cursor_line++;
-                    col = 0;
-                    if (first_line) {
-                        first_line = 0;
-                        effective_width = tui->term_cols;
-                    }
-                }
-            }
-        }
-    }
-
-    // If the text does not fit into the box, scroll it so that the line the
-    // cursor is on stays visible.
-    int start_line = cursor_line - (input_h - 1);
+    // Logical line the cursor sits on, so the visible window can be chosen
+    // to keep it inside the box (same wrapping rules as the draw loop and
+    // count_input_lines() below).
+    tui_input_line_col(tui->input_buf, tui->input_len, tui->input_cursor,
+                       first_width, tui->term_cols, &cursor_line,
+                       &cursor_col);
+    start_line = cursor_line - (input_h - 1);
     if (start_line < 0) start_line = 0;
 
-    cursor_move(input_start, 1);
-    int drawn_row = -1;
     if (start_line == 0) {
         write_str(ANSI_BOLD_GREEN);
         write_str("You: ");
         write_str(ANSI_RESET);
-        drawn_row = input_start; // Label is already drawn on this row
     }
 
-    int cursor_row = input_start;
-    int cursor_col = 1;
-    int line_idx   = 0;
-    int col        = 0;
-    int first_line = 1;
-    int effective_width = first_width;
-
     for (size_t i = 0; i <= tui->input_len; i++) {
+        int rel = line_idx - start_line;
         if (i == tui->input_cursor) {
-            cursor_row = input_start + (line_idx - start_line);
-            cursor_col = col + 1;
-            if (line_idx == 0 && start_line == 0) cursor_col += label_len;
+            vl = (rel > 0) ? rel : 0;
+            col0 = col + ((line_idx == 0 && start_line == 0)
+                              ? INPUT_LABEL_LEN : 0);
         }
         if (i == tui->input_len) break;
 
-        char c = tui->input_buf[i];
+        char c = buf[i];
 
         if (c == '\n') {
             line_idx++;
@@ -569,17 +540,12 @@ static void render_input(tui_t *tui) {
             continue;
         }
 
-        int rel = line_idx - start_line;
-        if (rel >= input_h) break;
-
-        if (rel >= 0) {
-            int row = input_start + rel;
-            if (drawn_row != row) {
-                cursor_move(row, 1);
-                drawn_row = row;
+        if (rel >= 0 && rel < input_h) {
+            if (rel != prev_rel) {
+                if (prev_rel >= 0) write_str("\r\n");
+                prev_rel = rel;
             }
-            char ch[2] = {c, 0};
-            write_str(ch);
+            out_write(buf + i, 1);
         }
 
         col++;
@@ -594,18 +560,168 @@ static void render_input(tui_t *tui) {
         }
     }
 
-    // Belt and braces: never leave the cursor outside the input box.
-    if (cursor_row > input_start + input_h - 1) cursor_row = input_start + input_h - 1;
-    if (cursor_row < input_start) cursor_row = input_start;
-    cursor_move(cursor_row, cursor_col);
+    // Make sure the cursor's row exists on screen even when it holds no
+    // characters (e.g. an empty last line after a trailing newline).
+    while (prev_rel < vl) {
+        if (prev_rel >= 0) write_str("\r\n");
+        prev_rel++;
+    }
+
+    *out_vl = vl;
+    *out_col0 = col0;
+}
+
+// Redraws the live area below the transcript: the trailing partial line
+// of an in-progress streamed message (when present), the separator row
+// and the input box. Leaves the terminal cursor at the input position and
+// records its live-area-relative row for the next erase.
+static void draw_live_area(tui_t *tui, const char *tail) {
+    int input_h = compute_input_box_height(tui);
+    int overhead = (tail != NULL ? 1 : 0) + 1; /* tail row + separator */
+    int vl = 0, col0 = 0;
+
+    /* Keep the live area inside the screen on very small terminals. */
+    if (input_h > tui->term_rows - overhead) {
+        input_h = tui->term_rows - overhead;
+    }
+    if (input_h < 1) input_h = 1;
+
+    write_str(ANSI_HIDE_CURSOR);
+
+    if (tail != NULL) {
+        write_str(tail);
+        write_str(ANSI_CLEAR_LINE);
+        write_str("\r\n");
+    }
+
+    draw_separator(tui);
+
+    draw_input_box(tui, input_h, &vl, &col0);
+    write_str(ANSI_CLEAR_LINE);
+
+    cursor_up((input_h - 1) - vl);
+    write_str("\r");
+    cursor_right(col0);
+    tui->cursor_row = (tail != NULL ? 1 : 0) + 1 + vl;
+
+    write_str(ANSI_SHOW_CURSOR);
+}
+
+// Current trailing unemitted line of the in-progress message, as a
+// malloc'd string (NULL when nothing is held back or on allocation
+// failure).
+static char *current_tail(tui_t *tui) {
+    char **lines = NULL;
+    size_t count = 0;
+    char *tail = NULL;
+
+    if (tui->msg_count == 0) return NULL;
+    lines = build_message_lines(tui->messages[tui->msg_count - 1].role,
+                                tui->messages[tui->msg_count - 1].content,
+                                tui->messages[tui->msg_count - 1].reasoning,
+                                message_content_width(tui), 1, &count);
+    if (lines != NULL && count > 0 &&
+        (size_t)tui->printed_lines < count) {
+        tail = strdup(lines[count - 1]);
+    }
+    free_message_lines(lines, count);
+    return tail;
+}
+
+// Erases and redraws the live area, keeping the trailing partial line of
+// an in-progress streamed message visible above the separator.
+static void refresh_live_area(tui_t *tui) {
+    char *tail = tui->streaming_active ? current_tail(tui) : NULL;
+
+    erase_live_area(tui);
+    draw_live_area(tui, tail);
+    free(tail);
+}
+
+// Brings the terminal up to date with the in-progress streamed message:
+// re-renders it and emits every newly completed display line to the
+// transcript (all remaining lines, including the trailing partial one,
+// when flush_all is set -- otherwise all but the last, which stays in
+// the live area as the visible "typing" line). Always repaints the live
+// area afterwards. A flushed stream is finished: the streaming state is
+// cleared and a blank line is left after the message.
+static void stream_sync(tui_t *tui, int flush_all) {
+    char **lines = NULL;
+    size_t count = 0;
+    char *tail = NULL;
+
+    if (tui->msg_count > 0 && tui->messages[tui->msg_count - 1].role != NULL &&
+        strcmp(tui->messages[tui->msg_count - 1].role, "assistant") == 0) {
+        /* Streaming build (no phantom label row) while the message is
+         * still growing; the commit flush uses the full render. */
+        lines = build_message_lines("assistant",
+                                    tui->messages[tui->msg_count - 1].content,
+                                    tui->messages[tui->msg_count - 1].reasoning,
+                                    message_content_width(tui), !flush_all,
+                                    &count);
+    }
+
+    erase_live_area(tui);
+
+    if (lines != NULL && count > 0) {
+        int emit_to = tui_stream_emit_to((int)count, flush_all);
+        for (int i = tui->printed_lines; i <= emit_to && (size_t)i < count;
+             i++) {
+            write_str(lines[i]);
+            write_str("\r\n");
+        }
+        if (emit_to >= tui->printed_lines) {
+            tui->printed_lines = emit_to + 1;
+            if (tui->printed_lines > (int)count) {
+                tui->printed_lines = (int)count;
+            }
+        }
+        /* The trailing line stays in the live area: copy it before the
+         * array is freed below. */
+        if (!flush_all && (size_t)tui->printed_lines < count) {
+            tail = strdup(lines[count - 1]);
+        }
+    }
+    free_message_lines(lines, count);
+
+    if (flush_all) {
+        write_str("\r\n"); /* blank line after the finished message */
+        tui->streaming_active = 0;
+        tui->printed_lines = 0;
+        draw_live_area(tui, NULL);
+    } else {
+        draw_live_area(tui, tail);
+        free(tail);
+    }
+}
+
+// Prints one committed message into the transcript (scrollback): flushes
+// any in-progress streamed message first, erases the live area, writes
+// the message's display lines followed by one blank line and repaints
+// the live area.
+static void print_message(tui_t *tui, const char *role, const char *content,
+                          const char *reasoning) {
+    if (tui->streaming_active) stream_sync(tui, 1);
+
+    erase_live_area(tui);
+
+    size_t count = 0;
+    char **lines = build_message_lines(role, content, reasoning,
+                                       message_content_width(tui), 0, &count);
+    if (lines != NULL) {
+        for (size_t i = 0; i < count; i++) {
+            write_str(lines[i]);
+            write_str("\r\n");
+        }
+        free_message_lines(lines, count);
+    }
+    write_str("\r\n"); /* blank line between transcript messages */
+    draw_live_area(tui, NULL);
 }
 
 void tui_render(tui_t *tui) {
-    write_str(ANSI_HIDE_CURSOR);
-    render_history(tui);
-    render_separator(tui);
-    render_input(tui);
-    write_str(ANSI_SHOW_CURSOR);
+    if (!tui) return;
+    refresh_live_area(tui);
     out_flush();
 }
 
@@ -626,7 +742,9 @@ int tui_init(tui_t **out) {
     tui->msg_cap = MESSAGES_INIT;
 
     tui->input_cap = INPUT_BUF_INIT;
-    tui->input_buf = malloc(tui->input_cap);
+    /* calloc: the draw loop reads buffer bytes for rendering; zeroed
+     * memory keeps every byte initialized from the start. */
+    tui->input_buf = calloc(1, tui->input_cap);
     if (!tui->input_buf) {
         fprintf(stderr, "tui_init: malloc input_buf failed\n");
         goto cleanup;
@@ -653,8 +771,10 @@ int tui_init(tui_t **out) {
     signal(SIGINT, fatal_signal_handler);
     signal(SIGTERM, fatal_signal_handler);
 
-    write_str(ANSI_CLEAR_SCREEN);
-    write_str(ANSI_CURSOR_HOME);
+    /* Transcript mode: never clear the screen. Start on a fresh line
+     * below the shell prompt; the conversation flows into the normal
+     * terminal scrollback from here. */
+    write_str("\r\n");
 
     *out = tui;
     tui = NULL; /* ownership transferred to the caller */
@@ -673,8 +793,9 @@ void tui_free(tui_t *tui) {
     if (!tui) return;
 
     tui_exit_raw(tui);
-    write_str(ANSI_CLEAR_SCREEN);
-    write_str(ANSI_CURSOR_HOME);
+    /* Leave the transcript visible: move below the input box, restore
+     * the cursor and let the shell prompt print on a fresh line. */
+    write_str("\r\n");
     write_str(ANSI_SHOW_CURSOR);
     out_flush();
 
@@ -706,31 +827,16 @@ void tui_free(tui_t *tui) {
     free(tui);
 }
 
-// Adjusts the scroll offset after the message history changes, then
-// repaints the screen.
-static void tui_after_history_change(tui_t *tui) {
-    int role_prefix   = 12;
-    int content_width = tui->term_cols - role_prefix;
-    if (content_width < 1) content_width = 1;
-    int history_rows  = compute_history_rows(tui);
-    int total         = total_rendered_lines(tui);
-    int overflow      = total - history_rows;
-    if (overflow > 0) {
-        tui->scroll_offset = overflow;
-    }
-
-    tui_render(tui);
-}
-
-void tui_append_message(tui_t *tui, const char *role, const char *content) {
-    if (!tui || !role || !content) return;
-
+// Appends a message to the in-memory history without printing it.
+// Returns 0 on success, -1 on allocation failure (nothing appended).
+static int append_message_store(tui_t *tui, const char *role,
+                                const char *content) {
     if (tui->msg_count >= tui->msg_cap) {
         size_t new_cap = tui->msg_cap * 2;
         tui_message_t *tmp = realloc(tui->messages, new_cap * sizeof(tui_message_t));
         if (!tmp) {
             fprintf(stderr, "tui_append_message: realloc failed\n");
-            return;
+            return -1;
         }
         tui->messages = tmp;
         tui->msg_cap  = new_cap;
@@ -742,29 +848,38 @@ void tui_append_message(tui_t *tui, const char *role, const char *content) {
         fprintf(stderr, "tui_append_message: strdup failed\n");
         free(r);
         free(c);
-        return;
+        return -1;
     }
 
     tui->messages[tui->msg_count].role    = r;
     tui->messages[tui->msg_count].content = c;
     tui->messages[tui->msg_count].reasoning = NULL;
     tui->msg_count++;
+    return 0;
+}
 
-    tui_after_history_change(tui);
+void tui_append_message(tui_t *tui, const char *role, const char *content) {
+    if (!tui || !role || !content) return;
+
+    if (append_message_store(tui, role, content) != 0) return;
+
+    print_message(tui, role, content, NULL);
+    out_flush();
 }
 
 void tui_stream_reasoning_append(tui_t *tui, const char *text) {
     if (!tui || !text || !*text) return;
 
-    if (tui->msg_count == 0 || tui->messages[tui->msg_count - 1].role == NULL ||
-        strcmp(tui->messages[tui->msg_count - 1].role, "assistant") != 0) {
-        // No assistant message yet: the first reasoning delta starts one
-        // (content stays empty until the first content delta arrives).
-        tui_append_message(tui, "assistant", "");
-        if (tui->msg_count == 0 ||
-            strcmp(tui->messages[tui->msg_count - 1].role, "assistant") != 0) {
-            return; // append failed (allocation error already reported)
-        }
+    if (!(tui->streaming_active && tui->msg_count > 0 &&
+          tui->messages[tui->msg_count - 1].role != NULL &&
+          strcmp(tui->messages[tui->msg_count - 1].role, "assistant") == 0)) {
+        // No assistant message in progress: the first reasoning delta
+        // starts one (content stays empty until the first content delta
+        // arrives). It is not printed yet: it exists only as the
+        // streaming target until its display lines complete.
+        if (append_message_store(tui, "assistant", "") != 0) return;
+        tui->streaming_active = 1;
+        tui->printed_lines = 0;
     }
 
     {
@@ -780,13 +895,15 @@ void tui_stream_reasoning_append(tui_t *tui, const char *text) {
         memcpy(m->reasoning + rlen, text, tlen + 1);
     }
 
-    tui_after_history_change(tui);
+    stream_sync(tui, 0);
+    out_flush();
 }
 
 void tui_stream_append(tui_t *tui, const char *text) {
     if (!tui || !text || !*text) return;
 
-    if (tui->msg_count > 0 && tui->messages[tui->msg_count - 1].role != NULL &&
+    if (tui->streaming_active && tui->msg_count > 0 &&
+        tui->messages[tui->msg_count - 1].role != NULL &&
         strcmp(tui->messages[tui->msg_count - 1].role, "assistant") == 0) {
         // Extend the in-progress assistant message with the delta.
         tui_message_t *m = &tui->messages[tui->msg_count - 1];
@@ -800,22 +917,27 @@ void tui_stream_append(tui_t *tui, const char *text) {
         m->content = tmp;
         memcpy(m->content + clen, text, tlen + 1);
     } else {
-        // No assistant message yet: the first delta starts one.
-        tui_append_message(tui, "assistant", text);
-        return; // tui_append_message already rendered
+        // No assistant message in progress: the first delta starts one
+        // (kept out of the transcript until its lines complete).
+        if (append_message_store(tui, "assistant", text) != 0) return;
+        tui->streaming_active = 1;
+        tui->printed_lines = 0;
     }
 
-    tui_after_history_change(tui);
+    stream_sync(tui, 0);
+    out_flush();
 }
 
 void tui_replace_assistant_message(tui_t *tui, const char *content,
                                    const char *reasoning) {
     if (!tui || !content) return;
 
-    if (tui->msg_count > 0 && tui->messages[tui->msg_count - 1].role != NULL &&
+    if (tui->streaming_active && tui->msg_count > 0 &&
+        tui->messages[tui->msg_count - 1].role != NULL &&
         strcmp(tui->messages[tui->msg_count - 1].role, "assistant") == 0) {
         // Commit the final reply into the message the streamed deltas
-        // have already created, so the text is not shown twice.
+        // have already created, so the text is not shown twice, and
+        // flush every remaining line of it into the transcript.
         tui_message_t *m = &tui->messages[tui->msg_count - 1];
         char *c = strdup(content);
         char *r = NULL;
@@ -836,22 +958,23 @@ void tui_replace_assistant_message(tui_t *tui, const char *content,
         m->content = c;
         free(m->reasoning);
         m->reasoning = r;
-        tui_after_history_change(tui);
+        stream_sync(tui, 1);
+        out_flush();
         return;
     }
 
-    // No streamed assistant message in progress: append normally.
-    tui_append_message(tui, "assistant", content);
-    if (tui->msg_count > 0 &&
-        tui->messages[tui->msg_count - 1].role != NULL &&
-        strcmp(tui->messages[tui->msg_count - 1].role, "assistant") == 0 &&
-        reasoning != NULL && reasoning[0] != '\0') {
+    // No streamed assistant message in progress: append and print in one
+    // go (the reasoning is display-only).
+    if (append_message_store(tui, "assistant", content) != 0) return;
+    if (tui->msg_count > 0 && reasoning != NULL && reasoning[0] != '\0') {
         tui_message_t *m = &tui->messages[tui->msg_count - 1];
         m->reasoning = strdup(reasoning);
         if (m->reasoning == NULL) {
             fprintf(stderr, "tui_replace_assistant_message: strdup failed\n");
         }
     }
+    print_message(tui, "assistant", content, reasoning);
+    out_flush();
 }
 
 void tui_set_status(tui_t *tui, const char *status) {
@@ -864,48 +987,51 @@ void tui_set_status(tui_t *tui, const char *status) {
             fprintf(stderr, "tui_set_status: strdup failed\n");
         }
     }
-    render_separator(tui);
-    render_input(tui);
+    refresh_live_area(tui);
     out_flush();
 }
 
 int tui_confirm(tui_t *tui, const char *prompt) {
     if (!tui || !prompt) return 0;
 
+    // Print the prompt as a transcript line below the live area so the
+    // question and its answer stay in the scrollback.
+    erase_live_area(tui);
     char line[256];
-    int n = snprintf(line, sizeof(line), "\r\n%s [y/n] ", prompt);
+    int n = snprintf(line, sizeof(line), "%s [y/n] ", prompt);
     if (n < 0 || (size_t)n >= sizeof(line)) {
-        write_str("\r\n[confirm prompt truncated] [y/n] ");
+        write_str("[confirm prompt truncated] [y/n] ");
     } else {
         write_str(line);
     }
     out_flush();
 
+    int answer = 0;
     while (1) {
         unsigned char b;
         if (read_byte(&b) != 0) {
-            write_str("n\r\n");
-            out_flush();
-            return 0; /* EOF/terminal gone: deny */
+            answer = 0; /* EOF/terminal gone: deny */
+            break;
         }
         if (b == 'y' || b == 'Y') {
-            write_str("y\r\n");
-            out_flush();
-            return 1;
+            answer = 1;
+            break;
         }
         if (b == 'n' || b == 'N') {
-            write_str("n\r\n");
-            out_flush();
-            return 0;
+            answer = 0;
+            break;
         }
         if (b == 0x03) {
             /* Ctrl-C: deny like every other escape path. */
-            write_str("n\r\n");
-            out_flush();
-            return 0;
+            answer = 0;
+            break;
         }
         /* Any other key: keep waiting. */
     }
+    write_str(answer ? "y\r\n" : "n\r\n");
+    refresh_live_area(tui);
+    out_flush();
+    return answer;
 }
 
 static int input_ensure_cap(tui_t *tui, size_t needed) {
@@ -953,6 +1079,118 @@ static void input_clear(tui_t *tui) {
     tui->input_len    = 0;
     tui->input_cursor = 0;
     tui->input_buf[0] = '\0';
+}
+
+void tui_input_line_col(const char *buf, size_t len, size_t index,
+                        int first_width, int width, int *out_line,
+                        int *out_col) {
+    int line = 0, col = 0, first_line = 1;
+    int effective;
+
+    if (first_width < 1) first_width = 1;
+    if (width < 1) width = 1;
+    effective = first_width;
+    if (index > len) index = len;
+
+    for (size_t i = 0; i < index; i++) {
+        char c = buf[i];
+        if (c == '\n') {
+            line++;
+            col = 0;
+            first_line = 0;
+            effective = width;
+        } else {
+            col++;
+            if (col >= effective) {
+                col = 0;
+                line++;
+                if (first_line) {
+                    first_line = 0;
+                    effective = width;
+                }
+            }
+        }
+    }
+    if (out_line) *out_line = line;
+    if (out_col) *out_col = col;
+}
+
+int tui_input_index_at(const char *buf, size_t len, int first_width,
+                       int width, int line, int col, size_t *out_index) {
+    int cur_line = 0, cur_col = 0, first_line = 1;
+    int effective;
+    size_t i = 0;
+
+    if (!buf) return -1;
+    if (first_width < 1) first_width = 1;
+    if (width < 1) width = 1;
+    effective = first_width;
+    if (line < 0) return -1;
+
+    /* Walk to the start of the requested visual line. Line breaks follow
+     * the input box wrapping rules: a newline or reaching the wrapping
+     * width starts a new line. */
+    while (i < len && cur_line < line) {
+        char c = buf[i];
+        if (c == '\n') {
+            cur_line++;
+            cur_col = 0;
+            first_line = 0;
+            effective = width;
+        } else {
+            cur_col++;
+            if (cur_col >= effective) {
+                cur_col = 0;
+                cur_line++;
+                if (first_line) {
+                    first_line = 0;
+                    effective = width;
+                }
+            }
+        }
+        i++;
+    }
+    if (cur_line < line) return -1; /* line beyond the input content */
+
+    /* Walk within the line up to the requested column, clamped to the
+     * line's end (a newline or a wrap boundary). */
+    int walked = 0;
+    while (i < len && walked < col && walked < effective) {
+        if (buf[i] == '\n') break;
+        i++;
+        walked++;
+    }
+    if (out_index) *out_index = i;
+    return 0;
+}
+
+int tui_stream_emit_to(int total_lines, int flush_all) {
+    if (total_lines <= 0) return -1;
+    if (flush_all) return total_lines - 1;
+    if (total_lines < 2) return -1; /* only the trailing line exists */
+    return total_lines - 2;
+}
+
+// Moves the input cursor up (delta < 0) or down (delta > 0) by one
+// visual line, keeping the logical column clamped to the target line's
+// end. No-op at the first/last line.
+static void input_move_vertical(tui_t *tui, int delta) {
+    int first_width = tui->term_cols - INPUT_LABEL_LEN;
+    int line = 0, col = 0;
+    size_t idx = 0;
+
+    if (first_width < 1) first_width = 1;
+    if (delta == 0) return;
+
+    tui_input_line_col(tui->input_buf, tui->input_len, tui->input_cursor,
+                       first_width, tui->term_cols, &line, &col);
+    int target = line + delta;
+    if (target < 0) return;
+    if (tui_input_index_at(tui->input_buf, tui->input_len, first_width,
+                           tui->term_cols, target, col, &idx) != 0) {
+        return; /* already on the last line */
+    }
+    tui->input_cursor = idx;
 }
 
 static int read_byte(unsigned char *b) {
@@ -1031,15 +1269,13 @@ char *tui_read_input(tui_t *tui) {
 
         if (b == '\n') {
             input_insert(tui, '\n');
-            render_separator(tui);
-            render_input(tui);
+            refresh_live_area(tui);
             continue;
         }
 
         if (b == 0x7f) {
             input_delete_before(tui);
-            render_separator(tui);
-            render_input(tui);
+            refresh_live_area(tui);
             continue;
         }
 
@@ -1051,8 +1287,7 @@ char *tui_read_input(tui_t *tui) {
                 // a lone ESC followed by a printable char does not lose it.
                 if (b2 >= 0x20) {
                     input_insert(tui, (char)b2);
-                    render_separator(tui);
-                    render_input(tui);
+                    refresh_live_area(tui);
                 }
                 continue;
             }
@@ -1061,72 +1296,49 @@ char *tui_read_input(tui_t *tui) {
 
             if (b3 == 'D') {
                 if (tui->input_cursor > 0) tui->input_cursor--;
-                render_input(tui);
+                refresh_live_area(tui);
                 continue;
             }
             if (b3 == 'C') {
                 if (tui->input_cursor < tui->input_len) tui->input_cursor++;
-                render_input(tui);
+                refresh_live_area(tui);
                 continue;
             }
             if (b3 == 'A') {
-                tui->scroll_offset++;
-                int total = total_rendered_lines(tui);
-                int history_rows = compute_history_rows(tui);
-                int max_scroll = total - history_rows;
-                if (max_scroll < 0) max_scroll = 0;
-                if (tui->scroll_offset > max_scroll) tui->scroll_offset = max_scroll;
-                render_history(tui);
-                render_input(tui);
+                // Up: move the cursor one visual line up inside the
+                // multi-line input box (scrolling is native now).
+                input_move_vertical(tui, -1);
+                refresh_live_area(tui);
                 continue;
             }
             if (b3 == 'B') {
-                if (tui->scroll_offset > 0) tui->scroll_offset--;
-                render_history(tui);
-                render_input(tui);
+                input_move_vertical(tui, 1);
+                refresh_live_area(tui);
                 continue;
             }
 
             if (b3 >= '0' && b3 <= '9') {
-                // CSI with parameters, e.g. ESC[3~ (Delete), ESC[5~ (PgUp),
-                // ESC[6~ (PgDn) or modified keys like ESC[1;5C (Ctrl-Right).
+                // CSI with parameters, e.g. ESC[3~ (Delete) or modified
+                // keys like ESC[1;5C (Ctrl-Right). PgUp/PgDn (ESC[5~ /
+                // ESC[6~) are ignored: the terminal scrolls natively.
                 unsigned char b4;
                 int params = 0;
                 while (params++ < 16 && read_byte(&b4) == 0) {
                     if (b4 == '~') {
                         if (b3 == '3') {
                             input_delete_after(tui);
-                            render_separator(tui);
-                            render_input(tui);
-                        } else if (b3 == '5') {
-                            int history_rows = compute_history_rows(tui);
-                            tui->scroll_offset += history_rows;
-                            int total = total_rendered_lines(tui);
-                            int max_scroll = total - history_rows;
-                            if (max_scroll < 0) max_scroll = 0;
-                            if (tui->scroll_offset > max_scroll) tui->scroll_offset = max_scroll;
-                            render_history(tui);
-                            render_input(tui);
-                        } else if (b3 == '6') {
-                            int history_rows = compute_history_rows(tui);
-                            if (tui->scroll_offset >= history_rows) {
-                                tui->scroll_offset -= history_rows;
-                            } else {
-                                tui->scroll_offset = 0;
-                            }
-                            render_history(tui);
-                            render_input(tui);
+                            refresh_live_area(tui);
                         }
                         break;
                     }
                     if (b4 == 'C') {
                         if (tui->input_cursor < tui->input_len) tui->input_cursor++;
-                        render_input(tui);
+                        refresh_live_area(tui);
                         break;
                     }
                     if (b4 == 'D') {
                         if (tui->input_cursor > 0) tui->input_cursor--;
-                        render_input(tui);
+                        refresh_live_area(tui);
                         break;
                     }
                     // Parameter bytes ('0'..'9', ';') and anything else are
@@ -1141,8 +1353,7 @@ char *tui_read_input(tui_t *tui) {
         // multi-byte character across lines.)
         if (b >= 0x20) {
             input_insert(tui, (char)b);
-            render_separator(tui);
-            render_input(tui);
+            refresh_live_area(tui);
             continue;
         }
     }
