@@ -129,14 +129,22 @@ int theme_default(theme_t *theme) {
     theme->reasoning_on = NULL;
     theme->status = NULL;
     theme->input = NULL;
+    theme->tool = NULL;
+    theme->tool_output = NULL;
+    theme->tool_error = NULL;
 
     theme->user_bg = strdup("\033[44m");     /* blue background */
     theme->reasoning_on = strdup("\033[2;3m"); /* dim + italic */
     theme->status = strdup("\033[1;33m");    /* bold yellow */
     theme->input = strdup("\033[1;32m");     /* bold green */
+    theme->tool = strdup("\033[1;35m");      /* bold magenta */
+    theme->tool_output = strdup("\033[90m"); /* bright black */
+    theme->tool_error = strdup("\033[1;31m"); /* bold red */
 
     if (theme->user_bg == NULL || theme->reasoning_on == NULL ||
-        theme->status == NULL || theme->input == NULL) {
+        theme->status == NULL || theme->input == NULL ||
+        theme->tool == NULL || theme->tool_output == NULL ||
+        theme->tool_error == NULL) {
         theme_free(theme);
         return -1;
     }
@@ -189,6 +197,18 @@ int theme_load(theme_t *theme, const toml_table_t *doc) {
         if (theme_replace(&theme->input, parse_fg(s), s) != 0)
             return -1;
     }
+    if (toml_get_string(section, "tool", &s) == 0) {
+        if (theme_replace(&theme->tool, parse_fg(s), s) != 0)
+            return -1;
+    }
+    if (toml_get_string(section, "tool_output", &s) == 0) {
+        if (theme_replace(&theme->tool_output, parse_fg(s), s) != 0)
+            return -1;
+    }
+    if (toml_get_string(section, "tool_error", &s) == 0) {
+        if (theme_replace(&theme->tool_error, parse_fg(s), s) != 0)
+            return -1;
+    }
     return 0;
 }
 
@@ -197,6 +217,9 @@ int theme_copy(theme_t *dst, const theme_t *src) {
     char *reasoning_on = NULL;
     char *status = NULL;
     char *input = NULL;
+    char *tool = NULL;
+    char *tool_output = NULL;
+    char *tool_error = NULL;
     int rc = -1;
 
     if (dst == NULL || src == NULL) return -1;
@@ -217,19 +240,40 @@ int theme_copy(theme_t *dst, const theme_t *src) {
         input = strdup(src->input);
         if (input == NULL) goto cleanup;
     }
+    if (src->tool != NULL) {
+        tool = strdup(src->tool);
+        if (tool == NULL) goto cleanup;
+    }
+    if (src->tool_output != NULL) {
+        tool_output = strdup(src->tool_output);
+        if (tool_output == NULL) goto cleanup;
+    }
+    if (src->tool_error != NULL) {
+        tool_error = strdup(src->tool_error);
+        if (tool_error == NULL) goto cleanup;
+    }
 
     free(dst->user_bg);
     free(dst->reasoning_on);
     free(dst->status);
     free(dst->input);
+    free(dst->tool);
+    free(dst->tool_output);
+    free(dst->tool_error);
     dst->user_bg = user_bg;
     dst->reasoning_on = reasoning_on;
     dst->status = status;
     dst->input = input;
+    dst->tool = tool;
+    dst->tool_output = tool_output;
+    dst->tool_error = tool_error;
     user_bg = NULL;
     reasoning_on = NULL;
     status = NULL;
     input = NULL;
+    tool = NULL;
+    tool_output = NULL;
+    tool_error = NULL;
     rc = 0;
 
 cleanup:
@@ -237,6 +281,9 @@ cleanup:
     free(reasoning_on);
     free(status);
     free(input);
+    free(tool);
+    free(tool_output);
+    free(tool_error);
     return rc;
 }
 
@@ -246,8 +293,14 @@ void theme_free(theme_t *theme) {
     free(theme->reasoning_on);
     free(theme->status);
     free(theme->input);
+    free(theme->tool);
+    free(theme->tool_output);
+    free(theme->tool_error);
     theme->user_bg = NULL;
     theme->reasoning_on = NULL;
     theme->status = NULL;
     theme->input = NULL;
+    theme->tool = NULL;
+    theme->tool_output = NULL;
+    theme->tool_error = NULL;
 }

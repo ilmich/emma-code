@@ -51,6 +51,29 @@ void  tui_stream_append(tui_t *tui, const char *text);
 void  tui_stream_reasoning_append(tui_t *tui, const char *text);
 void  tui_set_status(tui_t *tui, const char *status);
 /**
+ * @brief Starts a tool block in the transcript: prints the styled header
+ *        line (colored marker + title) and starts the status-line
+ *        spinner ("⠋ running <title>…") until tui_tool_finish() is
+ *        called for the same block.
+ *
+ * @param tui   TUI instance (may be NULL: no-op)
+ * @param title One-line block title (must not be NULL or empty; no-op
+ *              otherwise)
+ */
+void  tui_tool_start(tui_t *tui, const char *title);
+/**
+ * @brief Completes the tool block started by tui_tool_start(): stops
+ *        the spinner and prints the full tool output below the header,
+ *        styled as output on success or as an error block (✗ marker
+ *        color) on failure.
+ *
+ * @param tui    TUI instance (may be NULL: no-op)
+ * @param ok     Nonzero when the tool succeeded, 0 on failure
+ * @param output Full tool output to display (may be NULL or empty: only
+ *               the block is closed)
+ */
+void  tui_tool_finish(tui_t *tui, int ok, const char *output);
+/**
  * @brief Asks the user for a yes/no confirmation with an inline prompt.
  *
  * Prints "<prompt> [y/n]" on a new line and blocks until the user presses

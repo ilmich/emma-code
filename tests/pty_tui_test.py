@@ -340,6 +340,21 @@ def main():
     run_session(binary, "aistream", b"Hello from mock!",
                 forbidden=[b"Assistant: ", b"User: "])
 
+    # Tool call round-trip: the streamed tool call (read_file with path
+    # /tmp/x, assembled from argument fragments) must render as a tool
+    # block: the colored marker (U+25CF) + the tool's own title (name +
+    # path, from the title callback) in the header line, the tool
+    # output below it (styled with the tool output color: the read_file
+    # error for the nonexistent path) and the final reply after the
+    # tool result.
+    run_session(binary, "ssetoolround", b"Hello from mock!",
+                extra_patterns=[b"\xe2\x97\x8f read_file /tmp/x",
+                                b"\x1b[90m", b"/tmp/x"])
+
+    # ESC during an in-flight (stalled) reply: the turn must end
+    # promptly, keep the partial reply and return to the prompt.
+    run_interrupt_session(binary)
+
     # ESC during an in-flight (stalled) reply: the turn must end
     # promptly, keep the partial reply and return to the prompt.
     run_interrupt_session(binary)

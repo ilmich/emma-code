@@ -21,6 +21,9 @@ typedef struct {
     char *reasoning_on; /**< SGR sequence styling reasoning text (italic). */
     char *status;       /**< SGR sequence for the status line text. */
     char *input;        /**< SGR sequence for the live input box label. */
+    char *tool;         /**< SGR sequence for tool block headers (marker+title). */
+    char *tool_output;  /**< SGR sequence for tool output lines. */
+    char *tool_error;   /**< SGR sequence for failed tool blocks. */
 } theme_t;
 
 /**
@@ -38,9 +41,10 @@ int theme_default(theme_t *theme);
  * Accepted values: 16-color palette names ("black", "red", ..., plus
  * "bright_*"), numeric 256-color codes as foreground ("196") and
  * "on:<n>" as background ("on:17"). The reasoning key takes a style
- * name: "italic" (default), "dim" or "italic_dim". Missing keys keep
- * the current theme values; invalid values keep them too (warning on
- * stderr).
+ * name: "italic" (default), "dim" or "italic_dim". The tool keys
+ * ("tool", "tool_output", "tool_error") take foreground colors.
+ * Missing keys keep the current theme values; invalid values keep them
+ * too (warning on stderr).
  *
  * @param theme Theme to update in place (must not be NULL).
  * @param doc   Parsed config root table (NULL is a no-op success).

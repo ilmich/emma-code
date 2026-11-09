@@ -83,7 +83,7 @@ const tool_def_t *tools_find(const tool_registry_t *reg, const char *name)
 int tools_register(tool_registry_t *reg, const char *name,
                    const char *description, const char *parameters_schema,
                    int requires_approval, tool_handler_fn handler,
-                   void *userdata)
+                   tool_title_fn title, void *userdata)
 {
     tool_def_t *def;
     char *name_copy = NULL;
@@ -120,6 +120,7 @@ int tools_register(tool_registry_t *reg, const char *name,
     def->parameters = params_copy;
     def->requires_approval = requires_approval != 0;
     def->handler = handler;
+    def->title = title;
     def->userdata = userdata;
     name_copy = NULL; /* ownership transferred to the registry */
     desc_copy = NULL;
@@ -482,6 +483,45 @@ cleanup:
 /* Built-in registration                                               */
 /* ------------------------------------------------------------------ */
 
+/* Builds the one-line block title for the built-in tools: the tool name
+ * followed by its key argument (the command for bash, the file path for
+ * read_file/write_file). Malformed arguments fall back to NULL (the
+ * dispatcher then uses the generic format). */
+static char *builtin_title(const tool_def_t *tool, const char *args_json)
+{
+    char errbuf[128];
+    char *value = NULL;
+    char *title = NULL;
+    size_t len;
+    int n;
+
+    if (tool == NULL || tool->name == NULL)
+        return NULL;
+    if (strcmp(tool->name, "bash") == 0)
+        value = extract_string_arg(args_json, "command", errbuf,
+                                   sizeof errbuf);
+    else
+        value = extract_string_arg(args_json, "path", errbuf,
+                                   sizeof errbuf);
+    if (value == NULL)
+        return NULL;
+
+    len = strlen(tool->name) + 1 + strlen(value);
+    title = malloc(len + 1);
+    if (title == NULL) {
+        free(value);
+        return NULL;
+    }
+    n = snprintf(title, len + 1, "%s %s", tool->name, value);
+    if (n < 0 || (size_t)n >= len + 1) {
+        free(value);
+        free(title);
+        return NULL;
+    }
+    free(value);
+    return title;
+}
+
 int tools_register_builtins(tool_registry_t *reg)
 {
     static const char *read_schema =
@@ -501,17 +541,18 @@ int tools_register_builtins(tool_registry_t *reg)
         return -1;
     if (tools_register(reg, "read_file",
                        "Reads the full content of a file. Use this tool to explore files and understand their contents.", read_schema,
-                       0, tool_read_file, NULL) != 0)
+                       0, tool_read_file, builtin_title, NULL) != 0)
         return -1;
     if (tools_register(reg, "write_file",
                        "Create or overwrite a file. Use this tool to create or replace the entire content of a file.",
-                       write_schema, 0, tool_write_file, NULL) != 0)
+                       write_schema, 0, tool_write_file, builtin_title,
+                       NULL) != 0)
         return -1;
     if (tools_register(reg, "bash",
                        "Execute a system command via a shell. Use this tool to run build commands, "
                        "inspect the filesystem using `ls` or `find`, create temporary files, "
 		       "or perform any other task that can be accomplished by executing direct commands on the host system.",
-                       bash_schema, 1, tool_bash, NULL) != 0)
+                       bash_schema, 1, tool_bash, builtin_title, NULL) != 0)
         return -1;
     return 0;
 }

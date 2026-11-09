@@ -121,6 +121,18 @@ static void test_free_null_safe(void)
 	}
 }
 
+static void test_tool_block_null_safe(void)
+{
+	/* The tool block API is NULL-safe and rejects empty titles without
+	 * crashing (full rendering is exercised under the pty harness). */
+	tui_tool_start(NULL, "bash ls");
+	tui_tool_start(NULL, NULL);
+	tui_tool_start(NULL, "");
+	tui_tool_finish(NULL, 1, "output");
+	tui_tool_finish(NULL, 0, NULL);
+	tui_tool_finish(NULL, 1, NULL);
+}
+
 static void test_api_null_args_safe(void)
 {
 	/* append_message/set_status/stream_append reject NULL args. */
@@ -162,7 +174,7 @@ static void test_init_fails_without_tty(void)
 
 	{
 		/* An explicit default theme must behave the same way. */
-		theme_t theme = {NULL, NULL, NULL, NULL};
+		theme_t theme = {NULL, NULL, NULL, NULL, NULL, NULL, NULL};
 
 		TEST_CHECK_INT_EQ(theme_default(&theme), 0);
 		tui = NULL;
@@ -287,6 +299,7 @@ static void test_stream_emit_to(void)
 int main(void)
 {
 	TEST_RUN(test_free_null_safe);
+	TEST_RUN(test_tool_block_null_safe);
 	TEST_RUN(test_api_null_args_safe);
 	TEST_RUN(test_init_fails_without_tty);
 	TEST_RUN(test_input_line_col);

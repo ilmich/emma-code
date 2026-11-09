@@ -4,23 +4,26 @@
 extern char *strdup(const char *s);
 extern int pipe(int pipefd[2]);
 extern int close(int fd);
-#ifndef SIGWINCH
-#define SIGWINCH 28
-#endif
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
 #include <termios.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <signal.h>
+#include <pthread.h>
 #include "tui.h"
 #include "markdown.h"
 #include "util.h"
 #include "version.h"
+
+/* nanosleep is declared by <time.h> only under POSIX feature macros;
+ * redeclare it explicitly for strict C99 (matching the POSIX prototype). */
+extern int nanosleep(const struct timespec *req, struct timespec *rem);
 
 #define INPUT_MAX_LINES    5
 #define INPUT_BUF_INIT     256
@@ -37,11 +40,18 @@ extern int close(int fd);
 #define ANSI_SHOW_CURSOR   "\033[?25h"
 #define INPUT_LABEL_LEN    5 /* "You: " */
 #define USER_BLOCK_PAD     1 /* columns of padding inside message blocks */
+#define TOOL_OUTPUT_INDENT 2 /* extra indent of tool output under the header */
+#define SPINNER_INTERVAL_MS 100
+
+#define TOOL_MARK_OK   "\xe2\x97\x8f " /* ● + space (4 bytes) */
+#define TOOL_MARK_FAIL "\xe2\x9c\x97 " /* ✗ + space (4 bytes) */
+#define TOOL_MARK_LEN  3              /* marker glyph without the space */
 
 typedef struct {
     char *role;
     char *content;
     char *reasoning;
+    int   tool_failed; /* role "tool": nonzero when the tool failed */
 } tui_message_t;
 
 struct tui_t {
@@ -58,6 +68,15 @@ struct tui_t {
     theme_t        theme;
 
     char          *status;
+
+    /* Status-line spinner shown while a tool executes. The spinner runs
+     * on its own thread: it only repaints the live area (never the
+     * scrollback) under g_tui_lock, every SPINNER_INTERVAL_MS. */
+    pthread_t      spinner_tid;
+    int            spinner_active;  /* guarded by tui_lock */
+    int            spinner_joinable; /* a thread was created, not joined */
+    int            spinner_frame;   /* guarded by tui_lock */
+    char          *spinner_label;   /* guarded by tui_lock */
 
     char          *input_buf;
     size_t         input_len;
@@ -83,6 +102,19 @@ struct tui_t {
 
 static tui_t *g_tui = NULL;
 
+/* Serializes the live-area repaints between the main thread and the
+ * tool spinner thread. Recursive-free: only the outermost public entry
+ * points and the spinner loop take it, internal helpers never do. */
+static pthread_mutex_t g_tui_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void tui_lock(void) {
+    pthread_mutex_lock(&g_tui_lock);
+}
+
+static void tui_unlock(void) {
+    pthread_mutex_unlock(&g_tui_lock);
+}
+
 // Set by the SIGWINCH handler; processed in the main thread (signal handlers
 // must only touch async-signal-safe state).
 static volatile sig_atomic_t g_resize_pending = 0;
@@ -92,6 +124,9 @@ static volatile sig_atomic_t g_resize_pending = 0;
 static int g_resize_pipe[2] = { -1, -1 };
 
 static void out_flush(void); // defined below; used by the signal handler
+// The fatal signal handler must not lock (deadlock when the interrupted
+// thread held g_out_lock): it drains the buffer unlocked instead.
+static void out_flush_unlocked(void); // defined below; used by the signal handler
 static int read_byte(unsigned char *b); // defined below; used by tui_confirm
 
 static void tui_get_term_size(tui_t *tui) {
@@ -120,7 +155,7 @@ static void sigwinch_handler(int sig) {
 // not left in raw mode with a hidden cursor.
 static void fatal_signal_handler(int sig) {
     if (g_tui) {
-        out_flush(); // write() is async-signal-safe
+        out_flush_unlocked(); // write() is async-signal-safe
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_tui->orig_termios);
         g_tui->raw_mode = 0;
         (void)!write(STDOUT_FILENO, ANSI_SHOW_CURSOR, sizeof(ANSI_SHOW_CURSOR) - 1);
@@ -155,11 +190,15 @@ static void tui_exit_raw(tui_t *tui) {
 }
 
 // Buffered terminal output: batches rendering into large write() calls
-// instead of one syscall per character.
+// instead of one syscall per character. Shared with the tool spinner
+// thread, so every access is serialized by g_out_lock. Callers that
+// paint a multi-line sequence hold g_tui_lock around the whole
+// sequence, which keeps repaints from interleaving.
 static char   out_buf[OUT_BUF_SIZE];
 static size_t out_len = 0;
+static pthread_mutex_t g_out_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static void out_flush(void) {
+static void out_flush_unlocked(void) {
     size_t off = 0;
     while (off < out_len) {
         ssize_t n = write(STDOUT_FILENO, out_buf + off, out_len - off);
@@ -172,26 +211,35 @@ static void out_flush(void) {
     out_len = 0;
 }
 
+static void out_flush(void) {
+    pthread_mutex_lock(&g_out_lock);
+    out_flush_unlocked();
+    pthread_mutex_unlock(&g_out_lock);
+}
+
 static void out_write(const char *s, size_t len) {
+    pthread_mutex_lock(&g_out_lock);
     if (len > OUT_BUF_SIZE) {
         // Larger than the buffer itself: flush pending data, write directly.
-        out_flush();
+        out_flush_unlocked();
         size_t off = 0;
         while (off < len) {
             ssize_t n = write(STDOUT_FILENO, s + off, len - off);
             if (n < 0) {
                 if (errno == EINTR) continue;
-                return;
+                break;
             }
             off += (size_t)n;
         }
+        pthread_mutex_unlock(&g_out_lock);
         return;
     }
     if (out_len + len > OUT_BUF_SIZE) {
-        out_flush();
+        out_flush_unlocked();
     }
     memcpy(out_buf + out_len, s, len);
     out_len += len;
+    pthread_mutex_unlock(&g_out_lock);
 }
 
 // Cursor-relative movement helpers: the transcript model never knows the
@@ -217,6 +265,137 @@ static void cursor_right(int n) {
 
 static void write_str(const char *s) {
     out_write(s, strlen(s));
+}
+
+// Forward declarations: build_tool_lines sits above these helpers in
+// this file and needs their prototypes.
+static int block_pad(int term_cols);
+static int message_content_width(const tui_t *tui, const char *role);
+static void free_message_lines(char **lines, size_t count);
+static md_line_t *wrap_plain_lines(const char *text, int width,
+                                   size_t *out_count);
+static md_line_t *wrap_styled_lines(const char *text, const char *style,
+                                    int width, size_t *out_count);
+static int append_message_store(tui_t *tui, const char *role,
+                                const char *content);
+
+// Builds the display lines of a tool block. The header (when
+// include_header is set) is the colored marker (\u25cf, or \u2717 for a
+// failed tool) followed by the wrapped title; the output (when present)
+// is rendered as plain text, indented a further TOOL_OUTPUT_INDENT
+// columns under the header and styled with the tool output color (or
+// the error color when the tool failed).
+//
+// Returns a malloc'd array of malloc'd styled lines (free with
+// free_message_lines()), or NULL when there is nothing to render or on
+// allocation failure (*out_count is 0 in both cases).
+static char **build_tool_lines(const tui_t *tui, const char *title,
+                               const char *output, int failed,
+                               int include_header, size_t *out_count) {
+    md_line_t *title_lines = NULL;
+    md_line_t *out_lines = NULL;
+    size_t title_count = 0;
+    size_t body_count = 0;
+    size_t total = 0;
+    char **lines = NULL;
+    int width;
+    int pad;
+    const char *head_color;
+    const char *body_color;
+
+    if (out_count) *out_count = 0;
+    if (tui == NULL) return NULL;
+
+    width = message_content_width(tui, "tool") - TOOL_OUTPUT_INDENT;
+    if (width < 1) width = 1;
+    pad = block_pad(tui->term_cols);
+    head_color = failed ? tui->theme.tool_error : tui->theme.tool;
+    body_color = failed ? tui->theme.tool_error : tui->theme.tool_output;
+
+    if (include_header && title != NULL && title[0] != '\0')
+        title_lines = wrap_plain_lines(title, width, &title_count);
+    out_lines = wrap_styled_lines(output, body_color, width, &body_count);
+
+    total = title_count + body_count;
+    if (total == 0) {
+        md_lines_free(title_lines, title_count);
+        md_lines_free(out_lines, body_count);
+        return NULL;
+    }
+    lines = calloc(total, sizeof(char *));
+    if (!lines) {
+        md_lines_free(title_lines, title_count);
+        md_lines_free(out_lines, body_count);
+        return NULL;
+    }
+
+    for (size_t i = 0; i < total; i++) {
+        const char *body;
+        size_t body_len;
+        int is_head = i < title_count;
+        /* Header rows carry the color themselves; output rows are
+         * pre-styled by wrap_styled_lines. The marker glyph is 2 display
+         * columns but TOOL_MARK_LEN + 1 bytes in UTF-8. */
+        size_t color_len = is_head ? strlen(head_color) : 0;
+        size_t reset_len = is_head ? sizeof(ANSI_RESET) - 1 : 0;
+        /* Marker bytes on the first row, two continuation spaces on the
+         * following header rows, TOOL_OUTPUT_INDENT spaces on output. */
+        size_t mark_len = !is_head ? 0
+                          : (i == 0 ? TOOL_MARK_LEN + 1 : 2);
+        size_t pad_len = (size_t)pad +
+                         (is_head ? (size_t)0
+                                  : (size_t)TOOL_OUTPUT_INDENT);
+        char *row;
+
+        if (is_head) {
+            body = (title_lines[i].text != NULL) ? title_lines[i].text : "";
+        } else {
+            size_t j = i - title_count;
+            body = (j < body_count && out_lines[j].text != NULL)
+                       ? out_lines[j].text : "";
+        }
+        body_len = strlen(body);
+
+        row = malloc(pad_len + color_len + mark_len + body_len +
+                     reset_len + 1);
+        if (!row) {
+            free_message_lines(lines, total);
+            md_lines_free(title_lines, title_count);
+            md_lines_free(out_lines, body_count);
+            return NULL;
+        }
+        {
+            size_t off = 0;
+
+            for (size_t p = 0; p < pad_len; p++) row[off++] = ' ';
+            if (is_head) {
+                memcpy(row + off, head_color, color_len);
+                off += color_len;
+                if (i == 0) {
+                    const char *mark = failed ? TOOL_MARK_FAIL
+                                              : TOOL_MARK_OK;
+                    memcpy(row + off, mark, mark_len);
+                    off += mark_len;
+                } else {
+                    row[off++] = ' ';
+                    row[off++] = ' ';
+                }
+            }
+            memcpy(row + off, body, body_len);
+            off += body_len;
+            if (is_head) {
+                memcpy(row + off, ANSI_RESET, reset_len + 1);
+                off += reset_len;
+            }
+            row[off] = '\0';
+        }
+        lines[i] = row;
+    }
+
+    md_lines_free(title_lines, title_count);
+    md_lines_free(out_lines, body_count);
+    if (out_count) *out_count = total;
+    return lines;
 }
 
 // Word-wraps plain text into unstyled lines owned by the caller (free
@@ -416,7 +595,8 @@ static const char *skip_leading_breaks(const char *s) {
 // allocation failure (*out_count is 0 in both cases).
 static char **build_message_lines(const tui_t *tui, const char *role,
                                   const char *content, const char *reasoning,
-                                  int streaming, size_t *out_count) {
+                                  int streaming, int tool_failed,
+                                  size_t *out_count) {
     md_line_t *body_lines = NULL;
     md_line_t *md_lines = NULL;
     size_t body_count = 0;
@@ -429,6 +609,12 @@ static char **build_message_lines(const tui_t *tui, const char *role,
     int sep;
 
     if (out_count) *out_count = 0;
+
+    /* Tool blocks render through their dedicated builder: colored
+     * header (marker + title) and plain indented output. */
+    if (role != NULL && strcmp(role, "tool") == 0)
+        return build_tool_lines(tui, content, reasoning, tool_failed, 1,
+                                out_count);
 
     is_user = (role != NULL && strcmp(role, "user") == 0);
     width = message_content_width(tui, role);
@@ -567,10 +753,30 @@ static void erase_live_area(tui_t *tui) {
     tui->cursor_row = 0;
 }
 
-// Draws the separator row: the status text when set, otherwise a full
-// row of dashes. Moves to the next line afterwards.
+// Braille spinner frames cycled while a tool executes (UTF-8 encoded:
+// U+280B, U+2819, U+2839, U+2838, U+283C, U+2834, U+2826, U+2827,
+// U+2807, U+280F).
+static const char *SPINNER_FRAMES[] = {
+    "\xe2\xa0\x8b", "\xe2\xa0\x99", "\xe2\xa0\xb9", "\xe2\xa0\xb8",
+    "\xe2\xa0\xbc", "\xe2\xa0\xb4", "\xe2\xa0\xa6", "\xe2\xa0\xa7",
+    "\xe2\xa0\x87", "\xe2\xa0\x8f",
+};
+#define SPINNER_FRAMES_COUNT (sizeof SPINNER_FRAMES / sizeof SPINNER_FRAMES[0])
+
+// Draws the separator row: the tool spinner while a tool executes, the
+// status text when set, otherwise a full row of dashes. Moves to the
+// next line afterwards.
 static void draw_separator(tui_t *tui) {
-    if (tui->status && tui->status[0]) {
+    if (tui->spinner_active) {
+        write_str(tui->theme.tool);
+        write_str(" ");
+        write_str(SPINNER_FRAMES[tui->spinner_frame % SPINNER_FRAMES_COUNT]);
+        write_str(" running ");
+        write_str(tui->spinner_label != NULL ? tui->spinner_label : "tool");
+        write_str("\xe2\x80\xa6"); /* … */
+        write_str(ANSI_RESET);
+        write_str(ANSI_CLEAR_LINE);
+    } else if (tui->status && tui->status[0]) {
         write_str(tui->theme.status);
         write_str(" ");
         write_str(tui->status);
@@ -718,7 +924,9 @@ static char *current_tail(tui_t *tui) {
                                 tui->messages[tui->msg_count - 1].role,
                                 tui->messages[tui->msg_count - 1].content,
                                 tui->messages[tui->msg_count - 1].reasoning,
-                                1, &count);
+                                1,
+                                tui->messages[tui->msg_count - 1].tool_failed,
+                                &count);
     if (lines != NULL && count > 0 &&
         (size_t)tui->printed_lines < count) {
         tail = strdup(lines[count - 1]);
@@ -735,6 +943,73 @@ static void refresh_live_area(tui_t *tui) {
     erase_live_area(tui);
     draw_live_area(tui, tail);
     free(tail);
+}
+
+// Body of the tool spinner thread: advances the frame and repaints the
+// live area (showing the spinner in the separator row) until
+// spinner_active is cleared by the main thread.
+static void *spinner_thread(void *arg) {
+    tui_t *tui = arg;
+    struct timespec pause = {0, SPINNER_INTERVAL_MS * 1000 * 1000};
+
+    for (;;) {
+        tui_lock();
+        if (!tui->spinner_active) {
+            tui_unlock();
+            break;
+        }
+        tui->spinner_frame = (tui->spinner_frame + 1) %
+                             (int)SPINNER_FRAMES_COUNT;
+        refresh_live_area(tui);
+        out_flush();
+        tui_unlock();
+        nanosleep(&pause, NULL);
+    }
+    return NULL;
+}
+
+// Starts the spinner thread for the given tool title. On failure the
+// spinner stays off (the header line is still shown; only the animation
+// is lost). Callers must hold no lock: this one takes it around the
+// state updates.
+static void spinner_start(tui_t *tui, const char *label) {
+    char *copy = NULL;
+
+    if (tui->spinner_active) return;
+    copy = util_strdup(label);
+    if (copy == NULL) return; /* no animation: header is still shown */
+
+    tui_lock();
+    free(tui->spinner_label);
+    tui->spinner_label = copy;
+    tui->spinner_frame = 0;
+    tui->spinner_active = 1;
+    if (pthread_create(&tui->spinner_tid, NULL, spinner_thread, tui) != 0) {
+        tui->spinner_active = 0;
+        free(tui->spinner_label);
+        tui->spinner_label = NULL;
+        tui_unlock();
+        return;
+    }
+    tui->spinner_joinable = 1;
+    tui_unlock();
+}
+
+// Stops the spinner thread and restores the plain separator (status
+// text or dashes). Safe to call when no spinner is running.
+static void spinner_stop(tui_t *tui) {
+    if (!tui->spinner_joinable) {
+        tui->spinner_active = 0;
+        return;
+    }
+    tui_lock();
+    tui->spinner_active = 0;
+    tui_unlock();
+    pthread_join(tui->spinner_tid, NULL);
+    tui->spinner_joinable = 0;
+    free(tui->spinner_label);
+    tui->spinner_label = NULL;
+    refresh_live_area(tui);
 }
 
 // Brings the terminal up to date with the in-progress streamed message:
@@ -756,7 +1031,7 @@ static void stream_sync(tui_t *tui, int flush_all) {
         lines = build_message_lines(tui, "assistant",
                                     tui->messages[tui->msg_count - 1].content,
                                     tui->messages[tui->msg_count - 1].reasoning,
-                                    !flush_all, &count);
+                                    !flush_all, 0, &count);
     }
 
     erase_live_area(tui);
@@ -887,14 +1162,19 @@ static void print_banner(tui_t *tui) {
 void tui_show_banner(tui_t *tui) {
     if (!tui) return;
 
+    tui_lock();
     if (tui->streaming_active) stream_sync(tui, 1);
 
     print_banner(tui);
+    tui_unlock();
 }
 
 void tui_clear(tui_t *tui) {
     if (!tui) return;
 
+    spinner_stop(tui);
+
+    tui_lock();
     if (tui->streaming_active) stream_sync(tui, 1);
 
     erase_live_area(tui);
@@ -916,6 +1196,7 @@ void tui_clear(tui_t *tui) {
     write_str(ANSI_CLEAR_SCREEN);
 
     print_banner(tui);
+    tui_unlock();
 }
 
 // Prints one committed message into the transcript (scrollback): flushes
@@ -923,14 +1204,14 @@ void tui_clear(tui_t *tui) {
 // the message's display lines followed by one blank line and repaints
 // the live area.
 static void print_message(tui_t *tui, const char *role, const char *content,
-                          const char *reasoning) {
+                          const char *reasoning, int tool_failed) {
     if (tui->streaming_active) stream_sync(tui, 1);
 
     erase_live_area(tui);
 
     size_t count = 0;
     char **lines = build_message_lines(tui, role, content, reasoning,
-                                       0, &count);
+                                       0, tool_failed, &count);
     if (lines != NULL) {
         for (size_t i = 0; i < count; i++) {
             write_str(lines[i]);
@@ -944,8 +1225,83 @@ static void print_message(tui_t *tui, const char *role, const char *content,
 
 void tui_render(tui_t *tui) {
     if (!tui) return;
+    tui_lock();
     refresh_live_area(tui);
     out_flush();
+    tui_unlock();
+}
+
+void tui_tool_start(tui_t *tui, const char *title) {
+    char **lines = NULL;
+    size_t count = 0;
+
+    if (!tui || !title || !*title) return;
+
+    tui_lock();
+    if (tui->streaming_active) stream_sync(tui, 1);
+
+    /* The block header is stored as a role "tool" message (output
+     * follows in tui_tool_finish) so tui_clear replays the full block. */
+    if (append_message_store(tui, "tool", title) == 0) {
+        erase_live_area(tui);
+        lines = build_tool_lines(tui, title, NULL, 0, 1, &count);
+        if (lines != NULL) {
+            for (size_t i = 0; i < count; i++) {
+                write_str(lines[i]);
+                write_str("\r\n");
+            }
+            free_message_lines(lines, count);
+        }
+        draw_live_area(tui, NULL);
+        out_flush();
+    }
+    tui_unlock();
+
+    spinner_start(tui, title);
+}
+
+void tui_tool_finish(tui_t *tui, int ok, const char *output) {
+    char **lines = NULL;
+    size_t count = 0;
+
+    if (!tui) return;
+
+    spinner_stop(tui); /* own locking; restores the plain separator */
+
+    tui_lock();
+    /* Complete the stored block so tui_clear replays header + output. */
+    if (tui->msg_count > 0 &&
+        tui->messages[tui->msg_count - 1].role != NULL &&
+        strcmp(tui->messages[tui->msg_count - 1].role, "tool") == 0) {
+        tui_message_t *m = &tui->messages[tui->msg_count - 1];
+
+        m->tool_failed = !ok;
+        if (output != NULL) {
+            char *copy = strdup(output);
+            if (copy == NULL) {
+                fprintf(stderr, "tui_tool_finish: strdup failed\n");
+            } else {
+                free(m->reasoning);
+                m->reasoning = copy;
+            }
+        }
+    }
+
+    /* Print the output below the already-visible header, then close
+     * the block with the usual blank line. */
+    erase_live_area(tui);
+    lines = build_tool_lines(tui, NULL, output, !ok, 0, &count);
+    if (lines != NULL) {
+        for (size_t i = 0; i < count; i++) {
+            write_str(lines[i]);
+            write_str("\r\n");
+        }
+        free_message_lines(lines, count);
+    }
+    write_str("\r\n");
+    draw_live_area(tui, NULL);
+    out_flush();
+    tui_unlock();
 }
 
 int tui_init(tui_t **out, const theme_t *theme) {
@@ -1025,6 +1381,7 @@ cleanup:
 void tui_free(tui_t *tui) {
     if (!tui) return;
 
+    spinner_stop(tui);
     tui_exit_raw(tui);
     /* Leave the transcript visible: move below the input box, restore
      * the cursor and let the shell prompt print on a fresh line. */
@@ -1088,6 +1445,7 @@ static int append_message_store(tui_t *tui, const char *role,
     tui->messages[tui->msg_count].role    = r;
     tui->messages[tui->msg_count].content = c;
     tui->messages[tui->msg_count].reasoning = NULL;
+    tui->messages[tui->msg_count].tool_failed = 0;
     tui->msg_count++;
     return 0;
 }
@@ -1095,15 +1453,18 @@ static int append_message_store(tui_t *tui, const char *role,
 void tui_append_message(tui_t *tui, const char *role, const char *content) {
     if (!tui || !role || !content) return;
 
-    if (append_message_store(tui, role, content) != 0) return;
-
-    print_message(tui, role, content, NULL);
-    out_flush();
+    tui_lock();
+    if (append_message_store(tui, role, content) == 0) {
+        print_message(tui, role, content, NULL, 0);
+        out_flush();
+    }
+    tui_unlock();
 }
 
 void tui_stream_reasoning_append(tui_t *tui, const char *text) {
     if (!tui || !text || !*text) return;
 
+    tui_lock();
     if (!(tui->streaming_active && tui->msg_count > 0 &&
           tui->messages[tui->msg_count - 1].role != NULL &&
           strcmp(tui->messages[tui->msg_count - 1].role, "assistant") == 0)) {
@@ -1131,10 +1492,13 @@ void tui_stream_reasoning_append(tui_t *tui, const char *text) {
 
     stream_sync(tui, 0);
     out_flush();
+    tui_unlock();
 }
 
 void tui_stream_append(tui_t *tui, const char *text) {
     if (!tui || !text || !*text) return;
+
+    tui_lock();
 
     if (tui->streaming_active && tui->msg_count > 0 &&
         tui->messages[tui->msg_count - 1].role != NULL &&
@@ -1153,19 +1517,24 @@ void tui_stream_append(tui_t *tui, const char *text) {
     } else {
         // No assistant message in progress: the first delta starts one
         // (kept out of the transcript until its lines complete).
-        if (append_message_store(tui, "assistant", text) != 0) return;
+        if (append_message_store(tui, "assistant", text) != 0) {
+            tui_unlock();
+            return;
+        }
         tui->streaming_active = 1;
         tui->printed_lines = 0;
     }
 
     stream_sync(tui, 0);
     out_flush();
+    tui_unlock();
 }
 
 void tui_replace_assistant_message(tui_t *tui, const char *content,
                                    const char *reasoning) {
     if (!tui || !content) return;
 
+    tui_lock();
     if (tui->streaming_active && tui->msg_count > 0 &&
         tui->messages[tui->msg_count - 1].role != NULL &&
         strcmp(tui->messages[tui->msg_count - 1].role, "assistant") == 0) {
@@ -1177,6 +1546,7 @@ void tui_replace_assistant_message(tui_t *tui, const char *content,
         char *r = NULL;
         if (c == NULL) {
             fprintf(stderr, "tui_replace_assistant_message: strdup failed\n");
+            tui_unlock();
             return;
         }
         if (reasoning != NULL && reasoning[0] != '\0') {
@@ -1185,6 +1555,7 @@ void tui_replace_assistant_message(tui_t *tui, const char *content,
                 fprintf(stderr,
                         "tui_replace_assistant_message: strdup failed\n");
                 free(c);
+                tui_unlock();
                 return;
             }
         }
@@ -1194,12 +1565,16 @@ void tui_replace_assistant_message(tui_t *tui, const char *content,
         m->reasoning = r;
         stream_sync(tui, 1);
         out_flush();
+        tui_unlock();
         return;
     }
 
     // No streamed assistant message in progress: append and print in one
     // go (the reasoning is display-only).
-    if (append_message_store(tui, "assistant", content) != 0) return;
+    if (append_message_store(tui, "assistant", content) != 0) {
+        tui_unlock();
+        return;
+    }
     if (tui->msg_count > 0 && reasoning != NULL && reasoning[0] != '\0') {
         tui_message_t *m = &tui->messages[tui->msg_count - 1];
         m->reasoning = strdup(reasoning);
@@ -1207,12 +1582,14 @@ void tui_replace_assistant_message(tui_t *tui, const char *content,
             fprintf(stderr, "tui_replace_assistant_message: strdup failed\n");
         }
     }
-    print_message(tui, "assistant", content, reasoning);
+    print_message(tui, "assistant", content, reasoning, 0);
     out_flush();
+    tui_unlock();
 }
 
 void tui_set_status(tui_t *tui, const char *status) {
     if (!tui) return;
+    tui_lock();
     free(tui->status);
     tui->status = NULL;
     if (status) {
@@ -1223,13 +1600,16 @@ void tui_set_status(tui_t *tui, const char *status) {
     }
     refresh_live_area(tui);
     out_flush();
+    tui_unlock();
 }
 
 int tui_confirm(tui_t *tui, const char *prompt) {
     if (!tui || !prompt) return 0;
 
     // Print the prompt as a transcript line below the live area so the
-    // question and its answer stay in the scrollback.
+    // question and its answer stay in the scrollback. A tool spinner may
+    // be running while the user decides: the paint is serialized with it.
+    tui_lock();
     erase_live_area(tui);
     char line[256];
     int n = snprintf(line, sizeof(line), "%s [y/n] ", prompt);
@@ -1239,6 +1619,7 @@ int tui_confirm(tui_t *tui, const char *prompt) {
         write_str(line);
     }
     out_flush();
+    tui_unlock();
 
     int answer = 0;
     while (1) {
@@ -1262,9 +1643,11 @@ int tui_confirm(tui_t *tui, const char *prompt) {
         }
         /* Any other key: keep waiting. */
     }
+    tui_lock();
     write_str(answer ? "y\r\n" : "n\r\n");
     refresh_live_area(tui);
     out_flush();
+    tui_unlock();
     return answer;
 }
 

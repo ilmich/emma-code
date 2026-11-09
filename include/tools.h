@@ -24,17 +24,19 @@
 /** Headroom kept in the output buffer for trailing status notices. */
 #define TOOLS_NOTICE_ROOM 64
 
-/** A registered tool definition. Fields are owned by the registry. */
-typedef struct tool_def {
-    char *name;             /**< function name shown to the model */
-    char *description;      /**< function description shown to the model */
-    char *parameters;       /**< JSON schema of the arguments (string) */
-    int requires_approval;  /**< nonzero: dispatcher must confirm with the user */
-    /** Executes the tool. See tool_handler_fn for the contract. */
-    int (*handler)(const struct tool_def *tool, const char *arguments_json,
-                   char **result);
-    void *userdata;         /**< opaque context handed back to the handler */
-} tool_def_t;
+typedef struct tool_def tool_def_t;
+
+/**
+ * Signature of the optional title formatter.
+ *
+ * Builds the one-line title shown in the TUI tool block header from the
+ * raw arguments JSON (e.g. the command for bash, the path for read_file).
+ * Returns a malloc'ed string owned by the caller of the callback, or NULL
+ * when no title can be built (the dispatcher then falls back to the
+ * generic "name: arguments-preview" format).
+ */
+typedef char *(*tool_title_fn)(const tool_def_t *tool,
+                               const char *arguments_json);
 
 /**
  * Signature of a tool handler.
@@ -48,6 +50,20 @@ typedef struct tool_def {
  */
 typedef int (*tool_handler_fn)(const tool_def_t *tool,
                                const char *arguments_json, char **result);
+
+/** A registered tool definition. Fields are owned by the registry. */
+struct tool_def {
+    char *name;             /**< function name shown to the model */
+    char *description;      /**< function description shown to the model */
+    char *parameters;       /**< JSON schema of the arguments (string) */
+    int requires_approval;  /**< nonzero: dispatcher must confirm with the user */
+    /** Executes the tool. See tool_handler_fn for the contract. */
+    tool_handler_fn handler;
+    /** Builds the TUI block title (optional; NULL selects the generic
+     *  "name: arguments-preview" format). See tool_title_fn. */
+    tool_title_fn title;
+    void *userdata;         /**< opaque context handed back to the handler */
+};
 
 /** Opaque registry holding the tool definitions. */
 typedef struct tool_registry tool_registry_t;
@@ -66,7 +82,8 @@ void tools_registry_free(tool_registry_t *reg);
 
 /**
  * Registers a tool. name, description and parameters are copied into the
- * registry; userdata stays owned by the caller. Duplicate names are
+ * registry; userdata stays owned by the caller. The title callback is
+ * optional (NULL selects the generic title format). Duplicate names are
  * rejected.
  *
  * @return 0 on success, -1 on invalid arguments, duplicate name or OOM.
@@ -74,7 +91,7 @@ void tools_registry_free(tool_registry_t *reg);
 int tools_register(tool_registry_t *reg, const char *name,
                    const char *description, const char *parameters_schema,
                    int requires_approval, tool_handler_fn handler,
-                   void *userdata);
+                   tool_title_fn title, void *userdata);
 
 /** Looks a tool up by name. Returns NULL when not found. */
 const tool_def_t *tools_find(const tool_registry_t *reg, const char *name);

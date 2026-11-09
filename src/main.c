@@ -270,11 +270,38 @@ static void tool_args_preview(char *buf, size_t buflen, const char *args)
 }
 
 /**
+ * Builds the one-line block title for a tool call: the tool's own title
+ * callback when available, otherwise the generic "name: args-preview"
+ * format. Returns a malloc'ed string owned by the caller, or NULL on
+ * allocation failure.
+ */
+static char *tool_block_title(const tool_def_t *def, const char *name,
+			      const char *arguments_json)
+{
+	char preview[160];
+	char line[224];
+	char *title = NULL;
+	int n;
+
+	if (def->title != NULL)
+		title = def->title(def, arguments_json);
+	if (title != NULL)
+		return title;
+
+	tool_args_preview(preview, sizeof preview, arguments_json);
+	n = snprintf(line, sizeof line, "%s: %s", name, preview);
+	return n < 0 || (size_t)n >= sizeof line ? util_strdup(name)
+						 : util_strdup(line);
+}
+
+/**
  * Tool dispatcher wired into the agent loop: looks the tool up in the
- * registry, asks the user for confirmation when the tool is marked as
- * requiring approval, executes it and hands the text result back to the
- * model. Execution failures are never fatal: the error text is sent to
- * the model as the tool result. Returns nonzero only on malloc failure.
+ * registry, shows the tool block in the TUI (styled header, spinner in
+ * the status line), asks the user for confirmation when the tool is
+ * marked as requiring approval, executes it, completes the block with
+ * the full output and hands the text result back to the model.
+ * Execution failures are never fatal: the error text is sent to the
+ * model as the tool result. Returns nonzero only on malloc failure.
  */
 static int dispatch_tool(const char *name, const char *arguments_json,
 			 char **result, void *user_data)
@@ -283,7 +310,9 @@ static int dispatch_tool(const char *name, const char *arguments_json,
 	const tool_def_t *def;
 	char preview[160];
 	char line[224];
+	char *title = NULL;
 	int n;
+	int ok = 0;
 
 	if (result == NULL)
 		return 1;
@@ -305,9 +334,11 @@ static int dispatch_tool(const char *name, const char *arguments_json,
 	}
 
 	tool_args_preview(preview, sizeof preview, arguments_json);
-	n = snprintf(line, sizeof line, "[tool] %s: %s", name, preview);
-	if (n >= 0 && (size_t)n < sizeof line && ctx->tui != NULL)
-		tui_append_message(ctx->tui, "system", line);
+	title = tool_block_title(def, name, arguments_json);
+	if (title == NULL)
+		goto cleanup;
+	if (ctx->tui != NULL)
+		tui_tool_start(ctx->tui, title);
 
 	if (def->requires_approval) {
 		char prompt[192];
@@ -317,17 +348,24 @@ static int dispatch_tool(const char *name, const char *arguments_json,
 		if (n < 0 || (size_t)n >= sizeof prompt)
 			n = snprintf(prompt, sizeof prompt, "Allow %s?", name);
 		if (tui_confirm(ctx->tui, prompt) == 0) {
+			if (ctx->tui != NULL)
+				tui_tool_finish(ctx->tui, 0,
+						"[tool] denied by user");
 			*result = util_strdup("[tool] denied by user");
-			return *result == NULL;
+			goto cleanup;
 		}
 	}
 
-	if (ctx->tui != NULL)
-		tui_set_status(ctx->tui, NULL);
 	def->handler(def, arguments_json != NULL ? arguments_json : "",
 		     result);
 	if (*result == NULL)
 		*result = util_strdup("[tool error: out of memory]");
+	ok = 1;
+	if (ctx->tui != NULL)
+		tui_tool_finish(ctx->tui, ok, *result);
+
+cleanup:
+	free(title);
 	return *result == NULL;
 }
 
@@ -355,7 +393,7 @@ int main(void) {
     tool_dispatch_ctx_t tool_ctx = {0};
     size_t max_history = DEFAULT_MAX_HISTORY;
     int max_tool_rounds = DEFAULT_MAX_TOOL_ROUNDS;
-    theme_t theme = {NULL, NULL, NULL, NULL};
+    theme_t theme = {NULL, NULL, NULL, NULL, NULL, NULL, NULL};
     int commands_ready = 0;
     int http_ready = 0;
     int status = 1;

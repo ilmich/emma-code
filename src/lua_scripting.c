@@ -379,7 +379,7 @@ static int l_register_tool(lua_State *L)
 	lua_pop(L, 1);
 
 	rc = tools_register(bridge->tools, name, description, schema_json,
-			    requires_approval, lua_tool_handler, bridge);
+			    requires_approval, lua_tool_handler, NULL, bridge);
 	free(schema_json);
 	if (rc != 0) {
 		/* Undo the store to keep the table consistent. */

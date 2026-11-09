@@ -50,6 +50,86 @@ static int fake_handler(const tool_def_t *tool, const char *args_json,
 	return 0;
 }
 
+/** Trivial title formatter used by the registry tests. */
+static char *fake_title(const tool_def_t *tool, const char *args_json)
+{
+	(void)tool;
+	(void)args_json;
+	return util_strdup("fake-title");
+}
+
+static void test_title_callback(void)
+{
+	tool_registry_t *reg = NULL;
+	const tool_def_t *def;
+	char *title = NULL;
+
+	TEST_CHECK_INT_EQ((long long)tools_registry_init(&reg), 0);
+
+	/* NULL title is accepted and stored as NULL (generic fallback). */
+	TEST_CHECK_INT_EQ((long long)tools_register(reg, "plain", "d", "{}",
+					    0, fake_handler, NULL, NULL), 0);
+	def = tools_find(reg, "plain");
+	TEST_CHECK_NOT_NULL(def);
+	TEST_CHECK_NULL(def->title);
+
+	/* A provided title callback is stored and callable. */
+	TEST_CHECK_INT_EQ((long long)tools_register(reg, "titled", "d", "{}",
+					    0, fake_handler, fake_title,
+					    NULL), 0);
+	def = tools_find(reg, "titled");
+	TEST_CHECK_NOT_NULL(def);
+	TEST_CHECK_NOT_NULL(def->title);
+	title = def->title(def, "{}");
+	TEST_CHECK_STR_EQ(title, "fake-title");
+	free(title);
+
+	tools_registry_free(reg);
+}
+
+static void test_builtin_titles(void)
+{
+	tool_registry_t *reg = NULL;
+	const tool_def_t *def;
+	char *title = NULL;
+
+	TEST_CHECK_INT_EQ((long long)tools_registry_init(&reg), 0);
+	TEST_CHECK_INT_EQ((long long)tools_register_builtins(reg), 0);
+
+	/* bash: the title is the tool name + command. */
+	def = tools_find(reg, "bash");
+	TEST_CHECK_NOT_NULL(def);
+	TEST_CHECK_NOT_NULL(def->title);
+	title = def->title(def, "{\"command\":\"ls -la\"}");
+	TEST_CHECK_STR_EQ(title, "bash ls -la");
+	free(title);
+
+	/* read_file: the title is the tool name + path. */
+	def = tools_find(reg, "read_file");
+	TEST_CHECK_NOT_NULL(def);
+	TEST_CHECK_NOT_NULL(def->title);
+	title = def->title(def, "{\"path\":\"/tmp/x\"}");
+	TEST_CHECK_STR_EQ(title, "read_file /tmp/x");
+	free(title);
+
+	/* write_file: the title is the tool name + path too. */
+	def = tools_find(reg, "write_file");
+	TEST_CHECK_NOT_NULL(def);
+	TEST_CHECK_NOT_NULL(def->title);
+	title = def->title(def,
+			   "{\"path\":\"/tmp/y\",\"content\":\"c\"}");
+	TEST_CHECK_STR_EQ(title, "write_file /tmp/y");
+	free(title);
+
+	/* Malformed arguments yield NULL (the dispatcher falls back to
+	 * the generic "name: preview" format). */
+	TEST_CHECK_NULL(def->title(def, NULL));
+	TEST_CHECK_NULL(def->title(def, "not json"));
+	TEST_CHECK_NULL(def->title(def, "{}"));
+
+	tools_registry_free(reg);
+}
+
 static void test_register_and_find(void)
 {
 	tool_registry_t *reg = NULL;
@@ -57,10 +137,10 @@ static void test_register_and_find(void)
 
 	TEST_CHECK_INT_EQ((long long)tools_registry_init(&reg), 0);
 	TEST_CHECK_INT_EQ((long long)tools_register(reg, "alpha", "desc A",
-						    "{}", 0, fake_handler,
+						    "{}", 0, fake_handler, NULL,
 						    NULL), 0);
 	TEST_CHECK_INT_EQ((long long)tools_register(reg, "beta", "desc B",
-						    "{}", 1, fake_handler,
+						    "{}", 1, fake_handler, NULL,
 						    NULL), 0);
 	TEST_CHECK_INT_EQ((long long)tools_count(reg), 2);
 
@@ -90,24 +170,24 @@ static void test_register_invalid_args(void)
 
 	TEST_CHECK_INT_EQ((long long)tools_registry_init(&reg), 0);
 	TEST_CHECK_INT_EQ((long long)tools_register(NULL, "x", "d", "{}", 0,
-						    fake_handler, NULL), -1);
+						    fake_handler, NULL, NULL), -1);
 	TEST_CHECK_INT_EQ((long long)tools_register(reg, NULL, "d", "{}", 0,
-						    fake_handler, NULL), -1);
+						    fake_handler, NULL, NULL), -1);
 	TEST_CHECK_INT_EQ((long long)tools_register(reg, "", "d", "{}", 0,
-						    fake_handler, NULL), -1);
+						    fake_handler, NULL, NULL), -1);
 	TEST_CHECK_INT_EQ((long long)tools_register(reg, "x", NULL, "{}", 0,
-						    fake_handler, NULL), -1);
+						    fake_handler, NULL, NULL), -1);
 	TEST_CHECK_INT_EQ((long long)tools_register(reg, "x", "d", NULL, 0,
-						    fake_handler, NULL), -1);
+						    fake_handler, NULL, NULL), -1);
 	TEST_CHECK_INT_EQ((long long)tools_register(reg, "x", "d", "{}", 0,
-						    NULL, NULL), -1);
+						    NULL, NULL, NULL), -1);
 	TEST_CHECK_INT_EQ((long long)tools_count(reg), 0);
 
 	/* Duplicate names are rejected. */
 	TEST_CHECK_INT_EQ((long long)tools_register(reg, "dup", "d", "{}", 0,
-						    fake_handler, NULL), 0);
+						    fake_handler, NULL, NULL), 0);
 	TEST_CHECK_INT_EQ((long long)tools_register(reg, "dup", "other", "{}",
-						    0, fake_handler, NULL),
+						    0, fake_handler, NULL, NULL),
 			  -1);
 	TEST_CHECK_INT_EQ((long long)tools_count(reg), 1);
 
@@ -126,7 +206,7 @@ static void test_build_json(void)
 	TEST_CHECK_INT_EQ((long long)tools_register(reg, "my_tool",
 						    "does things",
 						    "{\"type\":\"object\"}", 0,
-						    fake_handler, NULL), 0);
+						    fake_handler, NULL, NULL), 0);
 	json = tools_build_json(reg);
 	TEST_CHECK_NOT_NULL(json);
 	TEST_CHECK(strstr(json, "\"type\":\"function\"") != NULL);
@@ -369,6 +449,8 @@ static void test_bash_output_truncated(void)
 
 int main(void)
 {
+	TEST_RUN(test_title_callback);
+	TEST_RUN(test_builtin_titles);
 	TEST_RUN(test_registry_init_and_free);
 	TEST_RUN(test_register_and_find);
 	TEST_RUN(test_register_invalid_args);
