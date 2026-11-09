@@ -84,7 +84,7 @@ graph TD
   eventuale conferma utente, esecuzione): il loop resta testabile e
   sostituibile.
 - **`tools` è il registro dei tool**: built-in (`read_file`, `write_file`,
-  `list_dir`, `bash`) e tool Lua (`emma.register_tool`) vivono nello
+  `bash`) e tool Lua (`emma.register_tool`) vivono nello
   stesso registry; la serializzazione per il payload OpenAI avviene in
   `tools_build_json()` e viene passata a `openai_client` come stringa JSON
   (nessuna dipendenza inversa).

@@ -47,9 +47,10 @@ static void test_system_prompt_content(void)
 
 	TEST_CHECK_NOT_NULL(strstr(p, "emma"));
 	TEST_CHECK_NOT_NULL(strstr(p, "read_file"));
-	TEST_CHECK_NOT_NULL(strstr(p, "list_dir"));
 	TEST_CHECK_NOT_NULL(strstr(p, "write_file"));
 	TEST_CHECK_NOT_NULL(strstr(p, "bash"));
+	/* Regression: list_dir was removed and must not be advertised. */
+	TEST_CHECK(strstr(p, "list_dir") == NULL);
 	/* No trailing whitespace: the prompt must be byte-stable. */
 	TEST_CHECK(p[strlen(p) - 1] != '\n');
 	TEST_CHECK(p[strlen(p) - 1] != ' ');

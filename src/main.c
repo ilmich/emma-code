@@ -148,7 +148,7 @@ static int load_config(openai_config_t *config, char **scripts_dir,
 	config->api_key = NULL;
 	config->base_url = NULL;
 	config->model_name = NULL;
-	config->temperature = 0.7;
+	config->temperature = 0.4;
 	config->stream = 0;
 	config->tools_json = NULL;
 	*scripts_dir = NULL;

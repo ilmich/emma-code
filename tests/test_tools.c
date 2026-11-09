@@ -1,7 +1,7 @@
 /**
  * @file test_tools.c
  * @brief Unit tests for src/tools.c: registry behavior and the built-in
- *        tool handlers (read_file, write_file, list_dir, bash).
+ *        tool handlers (read_file, write_file, bash).
  */
 
 #include "test.h"
@@ -142,12 +142,12 @@ static void test_build_json(void)
 static void test_builtins_registered(void)
 {
 	tool_registry_t *reg = NULL;
-	const char *names[] = { "read_file", "write_file", "bash", "list_dir" };
+	const char *names[] = { "read_file", "write_file", "bash" };
 
 	TEST_CHECK_INT_EQ((long long)tools_registry_init(&reg), 0);
 	TEST_CHECK_INT_EQ((long long)tools_register_builtins(reg), 0);
-	TEST_CHECK_INT_EQ((long long)tools_count(reg), 4);
-	for (size_t i = 0; i < 4; ++i) {
+	TEST_CHECK_INT_EQ((long long)tools_count(reg), 3);
+	for (size_t i = 0; i < 3; ++i) {
 		const tool_def_t *def = tools_find(reg, names[i]);
 
 		TEST_CHECK_NOT_NULL(def);
@@ -162,8 +162,8 @@ static void test_builtins_registered(void)
 	    (long long)tools_find(reg, "read_file")->requires_approval, 0);
 	TEST_CHECK_INT_EQ(
 	    (long long)tools_find(reg, "write_file")->requires_approval, 0);
-	TEST_CHECK_INT_EQ(
-	    (long long)tools_find(reg, "list_dir")->requires_approval, 0);
+	/* list_dir was removed: it must no longer be registered. */
+	TEST_CHECK(tools_find(reg, "list_dir") == NULL);
 	TEST_CHECK_INT_EQ((long long)tools_register_builtins(NULL), -1);
 
 	tools_registry_free(reg);
@@ -300,42 +300,6 @@ static void test_write_file_errors(void)
 	tools_registry_free(reg);
 }
 
-static void test_list_dir(void)
-{
-	tool_registry_t *reg = NULL;
-	const tool_def_t *def;
-	char *result = NULL;
-
-	TEST_CHECK_INT_EQ((long long)tools_registry_init(&reg), 0);
-	TEST_CHECK_INT_EQ((long long)tools_register_builtins(reg), 0);
-	def = tools_find(reg, "list_dir");
-
-	/* The test binary runs from the repository root: Makefile exists. */
-	TEST_CHECK_INT_EQ((long long)def->handler(def, "{\"path\":\".\"}",
-						  &result),
-			  0);
-	TEST_CHECK_NOT_NULL(result);
-	TEST_CHECK(strstr(result, "Makefile") != NULL);
-	TEST_CHECK(strstr(result, "src") != NULL);
-	free(result);
-
-	/* Nonexistent directory. */
-	TEST_CHECK_INT_EQ(
-	    (long long)def->handler(
-		def, "{\"path\":\"/tmp/emma_no_dir_42\"}", &result),
-	    -1);
-	TEST_CHECK_NOT_NULL(result);
-	TEST_CHECK(strstr(result, "cannot") != NULL);
-	free(result);
-
-	/* Malformed arguments. */
-	TEST_CHECK_INT_EQ((long long)def->handler(def, "[]", &result), -1);
-	TEST_CHECK_NOT_NULL(result);
-	free(result);
-
-	tools_registry_free(reg);
-}
-
 static void test_bash(void)
 {
 	tool_registry_t *reg = NULL;
@@ -414,7 +378,6 @@ int main(void)
 	TEST_RUN(test_read_file_errors);
 	TEST_RUN(test_write_file_success);
 	TEST_RUN(test_write_file_errors);
-	TEST_RUN(test_list_dir);
 	TEST_RUN(test_bash);
 	TEST_RUN(test_bash_output_truncated);
 	return test__failures != 0;

@@ -75,7 +75,7 @@ Registering a hook for any other event name raises an error.
 
 Registers a tool the model can call during a chat turn. Tools are
 announced to the LLM together with the built-in ones (`read_file`,
-`write_file`, `list_dir`, `bash`); when the model requests one, emma
+`write_file`, `bash`); when the model requests one, emma
 executes the handler and feeds the result back to the model in the same
 turn.
 

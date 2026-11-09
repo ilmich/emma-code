@@ -1,7 +1,7 @@
 -- Example: registering custom tools the model can call.
 --
 -- Tools are announced to the LLM with the built-in ones (read_file,
--- write_file, list_dir, bash). When the model decides to call one, emma
+-- write_file, bash). When the model decides to call one, emma
 -- runs the handler and feeds the string result back to the model within
 -- the same turn.
 

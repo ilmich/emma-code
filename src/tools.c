@@ -1,11 +1,10 @@
 /**
  * @file tools.c
  * @brief Runtime tool registry and built-in tools (read_file, write_file,
- *        list_dir, bash).
+ *        bash).
  *
- * POSIX-only symbols (popen/pclose, directory access) are declared
- * explicitly instead of enabling feature-test macros (see AGENTS.md
- * portability rules).
+ * POSIX-only symbols (popen/pclose) are declared explicitly instead of
+ * enabling feature-test macros (see AGENTS.md portability rules).
  */
 
 #include "tools.h"
@@ -13,7 +12,6 @@
 
 #include "cjson/cJSON.h"
 
-#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -397,105 +395,6 @@ cleanup:
     return rc;
 }
 
-/** list_dir: {"path"} -> sorted directory listing. */
-static int tool_list_dir(const tool_def_t *tool, const char *args_json,
-                         char **result)
-{
-    extern DIR *opendir(const char *name);
-    extern struct dirent *readdir(DIR *dirp);
-    extern int closedir(DIR *dirp);
-
-    char errbuf[128];
-    char *path = NULL;
-    DIR *d = NULL;
-    struct dirent *ent;
-    char **names = NULL;
-    size_t count = 0;
-    size_t cap = 0;
-    size_t total = 1;
-    char *buf = NULL;
-    int rc = -1;
-
-    (void)tool;
-    if (result == NULL)
-        return -1;
-    *result = NULL;
-    path = extract_string_arg(args_json, "path", errbuf, sizeof errbuf);
-    if (path == NULL) {
-        *result = util_strdup(errbuf);
-        return -1;
-    }
-    d = opendir(path);
-    if (d == NULL) {
-        snprintf(errbuf, sizeof errbuf, "cannot open directory '%s'", path);
-        *result = util_strdup(errbuf);
-        goto cleanup;
-    }
-    while ((ent = readdir(d)) != NULL) {
-        if (count == cap) {
-            size_t new_cap = cap == 0 ? 32 : cap * 2;
-            char **grown = realloc(names, new_cap * sizeof(*grown));
-
-            if (grown == NULL) {
-                snprintf(errbuf, sizeof errbuf, "out of memory");
-                *result = util_strdup(errbuf);
-                goto cleanup;
-            }
-            names = grown;
-            cap = new_cap;
-        }
-        names[count] = util_strdup(ent->d_name);
-        if (names[count] == NULL) {
-            snprintf(errbuf, sizeof errbuf, "out of memory");
-            *result = util_strdup(errbuf);
-            goto cleanup;
-        }
-        total += strlen(ent->d_name) + 1;
-        count++;
-    }
-    if (count > 1)
-        qsort(names, count, sizeof(*names),
-              (int (*)(const void *, const void *))strcmp);
-
-    buf = malloc(total);
-    if (buf == NULL) {
-        snprintf(errbuf, sizeof errbuf, "out of memory");
-        *result = util_strdup(errbuf);
-        goto cleanup;
-    }
-    /* Build the listing by concatenation with explicit bounds. */
-    buf[0] = '\0';
-    {
-        size_t used = 0;
-
-        for (size_t i = 0; i < count; ++i) {
-            size_t nlen = strlen(names[i]);
-            int sep = i > 0;
-
-            if (used + sep + nlen + 1 > total)
-                break;
-            if (sep)
-                buf[used++] = '\n';
-            memcpy(buf + used, names[i], nlen);
-            used += nlen;
-            buf[used] = '\0';
-        }
-    }
-    *result = buf;
-    buf = NULL; /* ownership transferred to *result */
-    rc = 0;
-
-cleanup:
-    if (d != NULL)
-        closedir(d);
-    free(path);
-    for (size_t i = 0; i < count; ++i)
-        free(names[i]);
-    free(names);
-    free(buf);
-    return rc;
-}
-
 /** bash: {"command"} -> combined stdout+stderr and exit status. */
 static int tool_bash(const tool_def_t *tool, const char *args_json,
                      char **result)
@@ -597,29 +496,22 @@ int tools_register_builtins(tool_registry_t *reg)
         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":"
         "\"string\",\"description\":\"Shell command to execute\"}},"
         "\"required\":[\"command\"]}";
-    static const char *list_schema =
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\","
-        "\"description\":\"Directory to list\"}},\"required\":[\"path\"]}";
 
     if (reg == NULL)
         return -1;
     if (tools_register(reg, "read_file",
-                       "Read the full content of a text file", read_schema,
+                       "Reads the full content of a file. Use this tool to explore files and understand their contents.", read_schema,
                        0, tool_read_file, NULL) != 0)
         return -1;
     if (tools_register(reg, "write_file",
-                       "Create or overwrite a text file with the given "
-                       "content",
+                       "Create or overwrite a file. Use this tool to create or replace the entire content of a file.",
                        write_schema, 0, tool_write_file, NULL) != 0)
         return -1;
     if (tools_register(reg, "bash",
-                       "Execute a shell command and return its combined "
-                       "output and exit status",
+                       "Execute a system command via a shell. Use this tool to run build commands, "
+                       "inspect the filesystem using `ls` or `find`, create temporary files, "
+		       "or perform any other task that can be accomplished by executing direct commands on the host system.",
                        bash_schema, 1, tool_bash, NULL) != 0)
-        return -1;
-    if (tools_register(reg, "list_dir",
-                       "List the entries of a directory", list_schema, 0,
-                       tool_list_dir, NULL) != 0)
         return -1;
     return 0;
 }

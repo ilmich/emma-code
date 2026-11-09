@@ -96,7 +96,7 @@ size_t tools_count(const tool_registry_t *reg);
 char *tools_build_json(const tool_registry_t *reg);
 
 /**
- * Registers the built-in tools: read_file, write_file, list_dir and bash
+ * Registers the built-in tools: read_file, write_file and bash
  * (bash sets requires_approval).
  *
  * @return 0 on success, -1 on failure (registry left usable but possibly
