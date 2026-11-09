@@ -24,6 +24,7 @@
 
 #define DEFAULT_MAX_HISTORY 100
 #define DEFAULT_MAX_TOOL_ROUNDS 10
+#define DEFAULT_TIMEOUT_SECS 300L
 
 /** Context handed to the tool dispatcher (all pointers borrowed). */
 typedef struct {
@@ -212,6 +213,22 @@ static int load_config(openai_config_t *config, char **scripts_dir,
 	 * (non-streaming) when absent or not a boolean. */
 	if (toml_get_bool(doc, "stream", &config->stream) != 0)
 		config->stream = 0;
+
+	/* Optional HTTP stall timeout in seconds. Defaults to
+	 * DEFAULT_TIMEOUT_SECS when absent or invalid. */
+	{
+		long long timeout = 0;
+
+		config->timeout_secs = DEFAULT_TIMEOUT_SECS;
+		if (toml_get_int(doc, "http_timeout_secs", &timeout) == 0) {
+			if (timeout > 0)
+				config->timeout_secs = (long)timeout;
+			else
+				fprintf(stderr, "emma: ignoring invalid "
+					"http_timeout_secs, using %d seconds\n",
+					DEFAULT_TIMEOUT_SECS);
+		}
+	}
 
 	if (toml_get_string(doc, "scripts_dir", &s) == 0) {
 		*scripts_dir = util_strdup(s);

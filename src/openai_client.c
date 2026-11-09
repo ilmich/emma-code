@@ -734,6 +734,7 @@ static int send_request(
     req.user_data = stream_user_data;
     req.abort_check = g_interrupt_check != NULL ? interrupt_trampoline : NULL;
     req.abort_user_data = NULL;
+    req.timeout_secs = config->timeout_secs;
 
     memset(resp, 0, sizeof(*resp));
     {

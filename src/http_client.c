@@ -251,10 +251,13 @@ int http_request(const struct http_request_t *req, struct http_response_t *resp)
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "EmmaCode HTTP Client");
     /* Never hang forever on a stalled connection; a low total timeout
      * would kill legitimate long-lived LLM responses, so guard with a
-     * connect timeout and a low-speed stall detector instead. */
+     * connect timeout and a low-speed stall detector instead. The stall
+     * timeout is configurable (HTTP_TIMEOUT_SECS by default). */
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME,
+                     req->timeout_secs > 0 ? req->timeout_secs
+                                           : HTTP_TIMEOUT_SECS);
     /* Avoid SIGPIPE/longjmp-based DNS timeouts: the TUI installs its own
      * signal handlers and must not receive SIGPIPE from libcurl. */
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);

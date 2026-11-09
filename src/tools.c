@@ -657,6 +657,142 @@ cleanup:
     return rc;
 }
 
+/** edit_file: {"path", "old_string", "new_string"} -> confirmation. */
+static int tool_edit_file(const tool_def_t *tool, const char *args_json,
+                          char **result)
+{
+    char errbuf[128];
+    char *path = NULL;
+    char *old = NULL;
+    char *new = NULL;
+    char *content = NULL;
+    char *out = NULL;
+    FILE *fp = NULL;
+    char *match = NULL;
+    size_t old_len;
+    size_t new_len;
+    size_t prefix_len;
+    size_t out_len;
+    int rc = -1;
+
+    (void)tool;
+    if (result == NULL)
+        return -1;
+    *result = NULL;
+    path = extract_string_arg(args_json, "path", errbuf, sizeof errbuf);
+    if (path == NULL) {
+        *result = util_strdup(errbuf);
+        return -1;
+    }
+    old = extract_string_arg(args_json, "old_string", errbuf,
+                             sizeof errbuf);
+    if (old == NULL) {
+        *result = util_strdup(errbuf);
+        goto cleanup;
+    }
+    new = extract_string_arg(args_json, "new_string", errbuf,
+                             sizeof errbuf);
+    if (new == NULL) {
+        *result = util_strdup(errbuf);
+        goto cleanup;
+    }
+    if (*old == '\0') {
+        *result = util_strdup("old_string must not be empty");
+        goto cleanup;
+    }
+    if (strcmp(old, new) == 0) {
+        *result = util_strdup("old_string and new_string are identical");
+        goto cleanup;
+    }
+
+    fp = fopen(path, "rb");
+    if (fp == NULL) {
+        snprintf(errbuf, sizeof errbuf, "cannot open '%s'", path);
+        *result = util_strdup(errbuf);
+        goto cleanup;
+    }
+    /* Read the whole file into memory; the buffer grows on demand. */
+    {
+        size_t cap = 4096;
+        size_t len = 0;
+
+        content = malloc(cap);
+        if (content == NULL)
+            goto cleanup;
+        for (;;) {
+            char *grown;
+            size_t got;
+
+            got = fread(content + len, 1, cap - len, fp);
+            len += got;
+            if (len < cap)
+                break; /* EOF reached (or nothing more to read) */
+            grown = realloc(content, cap * 2);
+            if (grown == NULL)
+                goto cleanup;
+            content = grown;
+            cap *= 2;
+        }
+        if (ferror(fp)) {
+            snprintf(errbuf, sizeof errbuf, "cannot read '%s'", path);
+            *result = util_strdup(errbuf);
+            goto cleanup;
+        }
+        content[len] = '\0';
+    }
+    match = strstr(content, old);
+    if (match == NULL) {
+        *result = util_strdup("old_string not found in the file");
+        goto cleanup;
+    }
+    if (strstr(match + 1, old) != NULL) {
+        *result = util_strdup("old_string matches multiple times; "
+                              "provide more surrounding context");
+        goto cleanup;
+    }
+
+    /* Rebuild the file content with the replacement applied. */
+    old_len = strlen(old);
+    new_len = strlen(new);
+    prefix_len = (size_t)(strstr(content, old) - content);
+    out_len = strlen(content) + new_len - old_len;
+    out = malloc(out_len + 1);
+    if (out == NULL)
+        goto cleanup;
+    memcpy(out, content, (size_t)(prefix_len));
+    memcpy(out + prefix_len, new, new_len);
+    memcpy(out + prefix_len + new_len, content + prefix_len + old_len,
+           out_len - prefix_len - new_len + 1);
+
+    fclose(fp);
+    fp = fopen(path, "wb");
+    if (fp == NULL) {
+        snprintf(errbuf, sizeof errbuf, "cannot open '%s' for writing",
+                 path);
+        *result = util_strdup(errbuf);
+        goto cleanup;
+    }
+    if (fwrite(out, 1, out_len, fp) != out_len || fflush(fp) != 0) {
+        snprintf(errbuf, sizeof errbuf, "cannot write '%s'", path);
+        *result = util_strdup(errbuf);
+        goto cleanup;
+    }
+    *result = util_strdup("replaced 1 occurrence");
+    if (*result == NULL)
+        goto cleanup;
+    rc = 0;
+
+cleanup:
+    if (fp != NULL)
+        fclose(fp);
+    free(content);
+    free(out);
+    free(path);
+    free(old);
+    free(new);
+    return rc;
+}
+
 /** bash: {"command"} -> combined stdout+stderr and exit status. */
 static int tool_bash(const tool_def_t *tool, const char *args_json,
                      char **result)
@@ -823,6 +959,13 @@ int tools_register_builtins(tool_registry_t *reg)
         "\"description\":\"Path of the file to write\"},\"content\":"
         "{\"type\":\"string\",\"description\":\"Full file content\"}},"
         "\"required\":[\"path\",\"content\"]}";
+    static const char *edit_schema =
+        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\","
+        "\"description\":\"Path of the file to edit\"},\"old_string\":"
+        "{\"type\":\"string\",\"description\":\"Exact text to replace\"},"
+        "\"new_string\":{\"type\":\"string\",\"description\":"
+        "\"Replacement text (empty string deletes)\"}},"
+        "\"required\":[\"path\",\"old_string\",\"new_string\"]}";
     static const char *bash_schema =
         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":"
         "\"string\",\"description\":\"Shell command to execute\"}},"
@@ -843,6 +986,14 @@ int tools_register_builtins(tool_registry_t *reg)
                        "Create or overwrite a file. Use this tool to create or replace the entire content of a file.",
                        write_schema, 0, tool_write_file, builtin_title,
                        NULL) != 0)
+        return -1;
+    if (tools_register(reg, "edit_file",
+                       "Replace an exact string in an existing file. "
+                       "'old_string' must appear exactly once in the file; "
+                       "include enough surrounding context to make it "
+                       "unique. Use this tool for targeted edits instead of "
+                       "rewriting whole files.", edit_schema,
+                       0, tool_edit_file, builtin_title, NULL) != 0)
         return -1;
     if (tools_register(reg, "bash",
                        "Execute a system command via a shell. Use this tool to run build commands, "

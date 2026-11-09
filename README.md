@@ -57,6 +57,7 @@ stream = false                          # optional, default: false; stream the r
 scripts_dir = "~/.config/emma/scripts"  # optional, Lua scripts directory
 max_history = 100                       # optional, max messages kept in the session
 max_tool_rounds = 10                    # optional, max tool-call rounds per message
+http_timeout_secs = 300                 # optional, HTTP inactivity timeout in seconds
 ```
 
 ### Run

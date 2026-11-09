@@ -283,6 +283,29 @@ static void test_http_stream_sse(void)
 	http_response_free(&resp);
 }
 
+/* A stalled transfer must be aborted when the inactivity timeout
+ * (http_request_t.timeout_secs) expires. The mock server stalls for 30s;
+ * a 1s timeout must fail the request well before that. */
+static void test_http_timeout_stall(void)
+{
+	char url[128];
+	struct http_request_t req = {0};
+	struct http_response_t resp = {0};
+
+	if (build_url(url, sizeof(url), "slowstream") != 0) {
+		return;
+	}
+	req.url = url;
+	req.method = (char *)"POST";
+	req.body = (char *)"{\"model\":\"test-model\",\"messages\":[]}";
+	req.headers = (char *[]){(char *)"Authorization: Bearer test-key-123"};
+	req.headers_count = 1;
+	req.timeout_secs = 1L;
+
+	TEST_CHECK_INT_EQ(http_request(&req, &resp), 1);
+	http_response_free(&resp);
+}
+
 int main(void)
 {
 	TEST_CHECK_INT_EQ(http_client_init(), 0);
@@ -296,6 +319,7 @@ int main(void)
 	TEST_RUN(test_http_stream_sse_no_space);
 	TEST_RUN(test_http_abort_nonstreaming);
 	TEST_RUN(test_http_abort_streaming_partial_body);
+	TEST_RUN(test_http_timeout_stall);
 
 	http_client_cleanup();
 

@@ -21,6 +21,44 @@ static void remove_tmp_file(void)
 	remove(TMP_FILE);
 }
 
+/** Reads the whole scratch file into a malloc'ed string (NULL on error). */
+static char *read_scratch_file(void)
+{
+	FILE *fp = fopen(TMP_FILE, "rb");
+	char *buf;
+	size_t len = 0;
+	size_t cap = 256;
+
+	if (fp == NULL)
+		return NULL;
+	buf = malloc(cap);
+	if (buf == NULL) {
+		fclose(fp);
+		return NULL;
+	}
+	for (;;) {
+		size_t got;
+
+		if (len + 1 >= cap) {
+			char *grown = realloc(buf, cap * 2);
+
+			if (grown == NULL) {
+				fclose(fp);
+				return NULL;
+			}
+			buf = grown;
+			cap *= 2;
+		}
+		got = fread(buf + len, 1, cap - len - 1, fp);
+		len += got;
+		if (len < cap - 1)
+			break;
+	}
+	buf[len] = '\0';
+	fclose(fp);
+	return buf;
+}
+
 static void test_registry_init_and_free(void)
 {
 	tool_registry_t *reg = NULL;
@@ -236,11 +274,12 @@ static void test_build_json(void)
 static void test_builtins_registered(void)
 {
 	tool_registry_t *reg = NULL;
-	const char *names[] = { "read_file", "write_file", "bash" };
+	const char *names[] = { "read_file", "write_file", "edit_file",
+				"bash" };
 
 	TEST_CHECK_INT_EQ((long long)tools_registry_init(&reg), 0);
 	TEST_CHECK_INT_EQ((long long)tools_register_builtins(reg), 0);
-	TEST_CHECK_INT_EQ((long long)tools_count(reg), 3);
+	TEST_CHECK_INT_EQ((long long)tools_count(reg), 4);
 	for (size_t i = 0; i < 3; ++i) {
 		const tool_def_t *def = tools_find(reg, names[i]);
 
@@ -681,6 +720,107 @@ static void test_bash_output_truncated(void)
 	tools_registry_free(reg);
 }
 
+/** edit_file: replaces an exact occurrence of old_string. */
+static void test_edit_file(void)
+{
+	tool_registry_t *reg = NULL;
+	const tool_def_t *def;
+	char *result = NULL;
+
+	remove_tmp_file();
+	TEST_CHECK_INT_EQ((long long)tools_registry_init(&reg), 0);
+	TEST_CHECK_INT_EQ((long long)tools_register_builtins(reg), 0);
+	def = tools_find(reg, "edit_file");
+	TEST_CHECK_NOT_NULL(def);
+
+	/* Successful replacement. */
+	write_numbered_lines(3);
+	TEST_CHECK_INT_EQ(
+	    (long long)def->handler(
+		def, "{\"path\":\"" TMP_FILE "\",\"old_string\":\"l2\","
+		     "\"new_string\":\"replaced\"}", &result),
+	    0);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK_STR_EQ(result, "replaced 1 occurrence");
+	free(result);
+	result = NULL;
+	TEST_CHECK_STR_EQ(read_scratch_file(),
+			  "l1\nreplaced\nl3\n");
+
+	/* old_string not found: file unchanged. */
+	TEST_CHECK_INT_EQ(
+	    (long long)def->handler(
+		def, "{\"path\":\"" TMP_FILE "\",\"old_string\":\"nope\","
+		     "\"new_string\":\"x\"}", &result),
+	    -1);
+	TEST_CHECK_NOT_NULL(result);
+	free(result);
+	result = NULL;
+	TEST_CHECK_STR_EQ(read_scratch_file(),
+			  "l1\nreplaced\nl3\n");
+
+	/* Multiple matches: file unchanged. */
+	write_numbered_lines(3);
+	TEST_CHECK_INT_EQ(
+	    (long long)def->handler(
+		def, "{\"path\":\"" TMP_FILE "\",\"old_string\":\"l\","
+		     "\"new_string\":\"x\"}", &result),
+	    -1);
+	TEST_CHECK_NOT_NULL(result);
+	free(result);
+	result = NULL;
+	TEST_CHECK_STR_EQ(read_scratch_file(),
+			  "l1\nl2\nl3\n");
+
+	/* Empty old_string is rejected. */
+	write_numbered_lines(1);
+	TEST_CHECK_INT_EQ(
+	    (long long)def->handler(
+		def, "{\"path\":\"" TMP_FILE "\",\"old_string\":\"\","
+		     "\"new_string\":\"x\"}", &result),
+	    -1);
+	TEST_CHECK_NOT_NULL(result);
+	free(result);
+	result = NULL;
+
+	/* Missing file is an error. */
+	remove_tmp_file();
+	TEST_CHECK_INT_EQ(
+	    (long long)def->handler(
+		def, "{\"path\":\"" TMP_FILE "\",\"old_string\":\"a\","
+		     "\"new_string\":\"b\"}", &result),
+	    -1);
+	TEST_CHECK_NOT_NULL(result);
+	free(result);
+	result = NULL;
+
+	/* new_string empty: deletion. */
+	write_numbered_lines(2);
+	TEST_CHECK_INT_EQ(
+	    (long long)def->handler(
+		def, "{\"path\":\"" TMP_FILE "\",\"old_string\":\"l2\\n\","
+		     "\"new_string\":\"\"}", &result),
+	    0);
+	TEST_CHECK_NOT_NULL(result);
+	free(result);
+	result = NULL;
+	TEST_CHECK_STR_EQ(read_scratch_file(), "l1\n");
+
+	/* old_string identical to new_string is rejected. */
+	write_numbered_lines(1);
+	TEST_CHECK_INT_EQ(
+	    (long long)def->handler(
+		def, "{\"path\":\"" TMP_FILE "\",\"old_string\":\"l1\","
+		     "\"new_string\":\"l1\"}", &result),
+	    -1);
+	TEST_CHECK_NOT_NULL(result);
+	free(result);
+	result = NULL;
+
+	remove_tmp_file();
+	tools_registry_free(reg);
+}
+
 int main(void)
 {
 	TEST_RUN(test_title_callback);
@@ -698,6 +838,7 @@ int main(void)
 	TEST_RUN(test_read_file_errors);
 	TEST_RUN(test_write_file_success);
 	TEST_RUN(test_write_file_errors);
+	TEST_RUN(test_edit_file);
 	TEST_RUN(test_bash);
 	TEST_RUN(test_bash_output_truncated);
 	return test__failures != 0;
