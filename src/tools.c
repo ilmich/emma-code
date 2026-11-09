@@ -12,6 +12,7 @@
 
 #include "cjson/cJSON.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -236,6 +237,53 @@ static char *extract_string_arg(const char *args_json, const char *field,
 }
 
 /**
+ * @brief Extracts an optional integer field from the tool arguments JSON.
+ *
+ * @param args_json Raw arguments string (may be NULL or malformed).
+ * @param field     Field name to extract.
+ * @param out       Receives the value when present; untouched otherwise.
+ * @param errbuf    Buffer receiving an error description on failure.
+ * @param errbuf_len Size of errbuf.
+ * @return 0 when the field is present and integral, 1 when absent (the
+ *         caller keeps its default), -1 on malformed JSON or a non-integer
+ *         value (errbuf describes the problem).
+ */
+static int extract_int_arg(const char *args_json, const char *field,
+                           long *out, char *errbuf, size_t errbuf_len)
+{
+    cJSON *root = NULL;
+    cJSON *item;
+    int rc = -1;
+
+    if (args_json == NULL || *args_json == '\0') {
+        snprintf(errbuf, errbuf_len, "missing arguments");
+        return -1;
+    }
+    root = cJSON_Parse(args_json);
+    if (root == NULL) {
+        snprintf(errbuf, errbuf_len, "arguments are not valid JSON");
+        return -1;
+    }
+    item = cJSON_GetObjectItem(root, field);
+    if (item == NULL || cJSON_IsNull(item)) {
+        rc = 1; /* absent: the caller keeps its default */
+        goto cleanup;
+    }
+    if (!cJSON_IsNumber(item) || item->valuedouble < (double)LONG_MIN ||
+        item->valuedouble > (double)LONG_MAX ||
+        item->valuedouble != (double)(long)item->valuedouble) {
+        snprintf(errbuf, errbuf_len, "non-integer '%s' argument", field);
+        goto cleanup;
+    }
+    *out = (long)item->valuedouble;
+    rc = 0;
+
+cleanup:
+    cJSON_Delete(root);
+    return rc;
+}
+
+/**
  * @brief Reads a whole stream into a malloc'ed buffer, truncating at
  *        TOOLS_RESULT_MAX. The buffer is always NUL-terminated.
  *
@@ -279,6 +327,157 @@ static char *read_stream(FILE *fp, int *truncated, size_t *cap_out)
     return buf;
 }
 
+/** Returns the number of decimal digits of n (n >= 0). */
+static int decimal_width(long n)
+{
+    int width = 1;
+
+    while (n >= 10) {
+        n /= 10;
+        width++;
+    }
+    return width;
+}
+
+/**
+ * @brief Appends src to a malloc'ed growable buffer, truncating at
+ *        TOOLS_RESULT_MAX (keeping TOOLS_NOTICE_ROOM headroom for the
+ *        trailing notices appended by the callers).
+ *
+ * @return 0 on success, 1 when the output cap was reached (the caller
+ *         marks the result as truncated), -1 on allocation failure.
+ *         On failure the buffer is left unchanged and still valid.
+ */
+static int buf_append(char **buf, size_t *cap, size_t *len,
+                      const char *src, size_t src_len)
+{
+    if (src_len == 0)
+        return 0;
+    while (*cap < *len + src_len + 1 + TOOLS_NOTICE_ROOM) {
+        size_t new_cap;
+        char *grown;
+
+        if (*cap >= TOOLS_RESULT_MAX)
+            return 1; /* cap reached: caller marks truncated */
+        new_cap = *cap * 2;
+        if (new_cap > TOOLS_RESULT_MAX)
+            new_cap = TOOLS_RESULT_MAX;
+        grown = realloc(*buf, new_cap);
+        if (grown == NULL)
+            return -1; /* keep what we have */
+        *buf = grown;
+        *cap = new_cap;
+    }
+    memcpy(*buf + *len, src, src_len);
+    *len += src_len;
+    (*buf)[*len] = '\0';
+    return 0;
+}
+
+/**
+ * @brief Counts the lines of an open stream and rewinds it.
+ *
+ * A final line without a trailing newline still counts (editor-style
+ * line numbering). Returns the line count (0 for an empty stream) or
+ * -1 on a read error.
+ */
+static long count_stream_lines(FILE *fp)
+{
+    char chunk[4096];
+    long count = 0;
+    size_t len = 0;
+
+    rewind(fp);
+    while (fgets(chunk, (int)sizeof chunk, fp) != NULL) {
+        len = strlen(chunk);
+        if (len > 0 && chunk[len - 1] == '\n')
+            count++;
+    }
+    if (ferror(fp))
+        return -1;
+    /* last line without a trailing newline still counts */
+    if (len > 0 && chunk[len - 1] != '\n')
+        count++;
+    rewind(fp);
+    return count;
+}
+
+/**
+ * @brief Reads the 1-based line range [start, start + limit) of an open
+ *        stream into a malloc'ed buffer, prefixing every emitted line
+ *        with its absolute line number (right-aligned to the width of
+ *        the last emitted line, followed by a tab). limit == 0 reads to
+ *        EOF. Truncates at TOOLS_RESULT_MAX.
+ *
+ * @param total     Total line count of the stream (from
+ *                  count_stream_lines(); fixes the number width).
+ * @param truncated Set to nonzero when the output cap was reached.
+ * @param cap_out   Receives the final buffer capacity.
+ * @return malloc'ed NUL-terminated buffer owned by the caller, or NULL
+ *         on allocation failure.
+ */
+static char *read_numbered_lines(FILE *fp, long start, long limit,
+                                 long total, int *truncated,
+                                 size_t *cap_out)
+{
+    size_t cap = 4096;
+    size_t len = 0;
+    char *buf = malloc(cap);
+    char chunk[4096];
+    long last = (limit > 0 && start + limit - 1 < total)
+                    ? start + limit - 1
+                    : total;
+    int width = decimal_width(last > 0 ? last : 1);
+    long line_no = 0;
+    int line_open = 0; /* a line chunk is being processed */
+    int emit_line = 0; /* the current line is inside the range */
+
+    *truncated = 0;
+    *cap_out = 0;
+    if (buf == NULL)
+        return NULL;
+    buf[0] = '\0';
+
+    while (fgets(chunk, (int)sizeof chunk, fp) != NULL) {
+        size_t chunk_len = strlen(chunk);
+        int st;
+
+        if (!line_open) {
+            char prefix[32];
+            int n;
+
+            line_no++;
+            emit_line = line_no >= start &&
+                        (limit == 0 || line_no < start + limit);
+            if (emit_line) {
+                n = snprintf(prefix, sizeof prefix, "%*ld\t", width,
+                             line_no);
+                if (n < 0 || (size_t)n >= sizeof prefix) {
+                    free(buf);
+                    return NULL;
+                }
+                st = buf_append(&buf, &cap, &len, prefix, (size_t)n);
+                if (st != 0) {
+                    *truncated = 1;
+                    break;
+                }
+            }
+            line_open = 1;
+        }
+        if (emit_line) {
+            st = buf_append(&buf, &cap, &len, chunk, chunk_len);
+            if (st != 0) {
+                *truncated = 1;
+                break;
+            }
+        }
+        if (chunk_len > 0 && chunk[chunk_len - 1] == '\n')
+            line_open = 0;
+    }
+    *cap_out = cap;
+    return buf;
+}
+
 /** Appends a truncation notice when output was cut short. */
 static char *finalize_result(char *buf, int truncated)
 {
@@ -298,7 +497,15 @@ static char *finalize_result(char *buf, int truncated)
 /* Built-in tool handlers                                              */
 /* ------------------------------------------------------------------ */
 
-/** read_file: {"path"} -> file content. */
+/**
+ * read_file: {"path"[, "offset", "limit"]} -> numbered file lines.
+ *
+ * offset (1-based, default 1) and limit (max lines, default 0 = to EOF)
+ * restrict the read to a portion of the file. Every emitted line is
+ * prefixed with its absolute line number. A range reaching past EOF is
+ * clamped to the available lines and a "[file has N lines]" note is
+ * appended instead of failing.
+ */
 static int tool_read_file(const tool_def_t *tool, const char *args_json,
                           char **result)
 {
@@ -307,7 +514,12 @@ static int tool_read_file(const tool_def_t *tool, const char *args_json,
     FILE *fp = NULL;
     char *buf = NULL;
     size_t cap = 0;
+    long offset = 1;
+    long limit = 0;
+    long total;
     int truncated = 0;
+    int clamped;
+    int arg_rc;
     int rc = -1;
 
     (void)tool;
@@ -319,17 +531,66 @@ static int tool_read_file(const tool_def_t *tool, const char *args_json,
         *result = util_strdup(errbuf);
         return -1;
     }
+    /* Optional range arguments: absent fields keep their defaults. */
+    arg_rc = extract_int_arg(args_json, "offset", &offset, errbuf,
+                             sizeof errbuf);
+    if (arg_rc < 0) {
+        *result = util_strdup(errbuf);
+        goto cleanup;
+    }
+    if (offset < 1) {
+        *result = util_strdup("'offset' must be >= 1");
+        goto cleanup;
+    }
+    arg_rc = extract_int_arg(args_json, "limit", &limit, errbuf,
+                             sizeof errbuf);
+    if (arg_rc < 0) {
+        *result = util_strdup(errbuf);
+        goto cleanup;
+    }
+    if (arg_rc == 0 && limit < 1) {
+        *result = util_strdup("'limit' must be >= 1");
+        goto cleanup;
+    }
     fp = fopen(path, "rb");
     if (fp == NULL) {
         snprintf(errbuf, sizeof errbuf, "cannot open '%s'", path);
         *result = util_strdup(errbuf);
         goto cleanup;
     }
-    buf = read_stream(fp, &truncated, &cap);
+    total = count_stream_lines(fp);
+    if (total < 0) {
+        snprintf(errbuf, sizeof errbuf, "cannot read '%s'", path);
+        *result = util_strdup(errbuf);
+        goto cleanup;
+    }
+    clamped = (offset > total) ||
+              (limit > 0 && offset + limit - 1 > total);
+    buf = read_numbered_lines(fp, offset, limit, total, &truncated, &cap);
     if (buf == NULL) {
         snprintf(errbuf, sizeof errbuf, "cannot read '%s'", path);
         *result = util_strdup(errbuf);
         goto cleanup;
+    }
+    if (clamped) {
+        size_t len = strlen(buf);
+        char note[64];
+        int n;
+
+        /* Avoid a doubled blank line when the content already ends
+         * with a newline. */
+        n = snprintf(note, sizeof note, "%s[file has %ld lines]",
+                     (len == 0 || buf[len - 1] == '\n') ? "" : "\n",
+                     total);
+        if (n < 0 || (size_t)n >= sizeof note) {
+            *result = util_strdup("cannot format range notice");
+            goto cleanup;
+        }
+        /* The append must fit the allocated buffer and the
+         * TOOLS_RESULT_MAX cap enforced by finalize_result(). */
+        if (len + (size_t)n + 1 <= cap &&
+            len + (size_t)n + 1 <= TOOLS_RESULT_MAX)
+            memcpy(buf + len, note, (size_t)n + 1);
     }
     *result = finalize_result(buf, truncated);
     buf = NULL; /* ownership transferred to *result */
@@ -490,9 +751,12 @@ cleanup:
 static char *builtin_title(const tool_def_t *tool, const char *args_json)
 {
     char errbuf[128];
+    char suffix[64];
     char *value = NULL;
     char *title = NULL;
     size_t len;
+    int has_offset;
+    int has_limit;
     int n;
 
     if (tool == NULL || tool->name == NULL)
@@ -506,13 +770,36 @@ static char *builtin_title(const tool_def_t *tool, const char *args_json)
     if (value == NULL)
         return NULL;
 
-    len = strlen(tool->name) + 1 + strlen(value);
+    /* read_file: append the requested line range when given. */
+    suffix[0] = '\0';
+    if (strcmp(tool->name, "read_file") == 0) {
+        long offset = 1;
+        long limit = 0;
+
+        has_offset = extract_int_arg(args_json, "offset", &offset, errbuf,
+                                     sizeof errbuf) == 0;
+        has_limit = extract_int_arg(args_json, "limit", &limit, errbuf,
+                                    sizeof errbuf) == 0;
+        if (has_offset && has_limit)
+            n = snprintf(suffix, sizeof suffix, " (offset %ld, limit %ld)",
+                         offset, limit);
+        else if (has_offset)
+            n = snprintf(suffix, sizeof suffix, " (offset %ld)", offset);
+        else if (has_limit)
+            n = snprintf(suffix, sizeof suffix, " (limit %ld)", limit);
+        else
+            n = 0;
+        if (n < 0 || (size_t)n >= sizeof suffix)
+            suffix[0] = '\0';
+    }
+
+    len = strlen(tool->name) + 1 + strlen(value) + strlen(suffix);
     title = malloc(len + 1);
     if (title == NULL) {
         free(value);
         return NULL;
     }
-    n = snprintf(title, len + 1, "%s %s", tool->name, value);
+    n = snprintf(title, len + 1, "%s %s%s", tool->name, value, suffix);
     if (n < 0 || (size_t)n >= len + 1) {
         free(value);
         free(title);
@@ -526,7 +813,11 @@ int tools_register_builtins(tool_registry_t *reg)
 {
     static const char *read_schema =
         "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\","
-        "\"description\":\"Path of the file to read\"}},\"required\":[\"path\"]}";
+        "\"description\":\"Path of the file to read\"},\"offset\":"
+        "{\"type\":\"integer\",\"description\":\"1-based line number to "
+        "start reading from (default 1)\"},\"limit\":{\"type\":\"integer\","
+        "\"description\":\"Maximum number of lines to read; omit to read "
+        "to the end of the file\"}},\"required\":[\"path\"]}";
     static const char *write_schema =
         "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\","
         "\"description\":\"Path of the file to write\"},\"content\":"
@@ -540,7 +831,12 @@ int tools_register_builtins(tool_registry_t *reg)
     if (reg == NULL)
         return -1;
     if (tools_register(reg, "read_file",
-                       "Reads the full content of a file. Use this tool to explore files and understand their contents.", read_schema,
+                       "Reads a file, prefixing every line with its line "
+                       "number. Optional 'offset' (1-based first line) and "
+                       "'limit' (max lines) restrict the read to a portion "
+                       "of the file, which is preferred for large files. "
+                       "Use this tool to explore files and understand their "
+                       "contents.", read_schema,
                        0, tool_read_file, builtin_title, NULL) != 0)
         return -1;
     if (tools_register(reg, "write_file",

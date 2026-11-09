@@ -104,12 +104,26 @@ static void test_builtin_titles(void)
 	TEST_CHECK_STR_EQ(title, "bash ls -la");
 	free(title);
 
-	/* read_file: the title is the tool name + path. */
+	/* read_file: the title is the tool name + path, plus the line
+	 * range when given. */
 	def = tools_find(reg, "read_file");
 	TEST_CHECK_NOT_NULL(def);
 	TEST_CHECK_NOT_NULL(def->title);
 	title = def->title(def, "{\"path\":\"/tmp/x\"}");
 	TEST_CHECK_STR_EQ(title, "read_file /tmp/x");
+	free(title);
+
+	title = def->title(def, "{\"path\":\"/tmp/x\",\"offset\":5}");
+	TEST_CHECK_STR_EQ(title, "read_file /tmp/x (offset 5)");
+	free(title);
+
+	title = def->title(def,
+			   "{\"path\":\"/tmp/x\",\"offset\":5,\"limit\":10}");
+	TEST_CHECK_STR_EQ(title, "read_file /tmp/x (offset 5, limit 10)");
+	free(title);
+
+	title = def->title(def, "{\"path\":\"/tmp/x\",\"limit\":10}");
+	TEST_CHECK_STR_EQ(title, "read_file /tmp/x (limit 10)");
 	free(title);
 
 	/* write_file: the title is the tool name + path too. */
@@ -272,8 +286,228 @@ static void test_read_file_success(void)
 			      def, "{\"path\":\"" TMP_FILE "\"}", &result),
 			  0);
 	TEST_CHECK_NOT_NULL(result);
-	TEST_CHECK_STR_EQ(result, "line one\nline two\n");
+	TEST_CHECK_STR_EQ(result, "1\tline one\n2\tline two\n");
 	free(result);
+	remove_tmp_file();
+	tools_registry_free(reg);
+}
+
+/** Writes count lines "l1\n".."lcount\n" to the scratch file. */
+static void write_numbered_lines(int count)
+{
+	FILE *fp = fopen(TMP_FILE, "wb");
+
+	if (fp != NULL) {
+		for (int i = 1; i <= count; ++i)
+			fprintf(fp, "l%d\n", i);
+		fclose(fp);
+	}
+	TEST_CHECK_NOT_NULL(fp);
+}
+
+static void test_read_file_range(void)
+{
+	tool_registry_t *reg = NULL;
+	const tool_def_t *def;
+	char *result = NULL;
+	char args[128];
+
+	remove_tmp_file();
+	TEST_CHECK_INT_EQ((long long)tools_registry_init(&reg), 0);
+	TEST_CHECK_INT_EQ((long long)tools_register_builtins(reg), 0);
+	def = tools_find(reg, "read_file");
+
+	/* offset + limit: only the requested lines, with absolute numbers. */
+	write_numbered_lines(10);
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"offset\":3,\"limit\":2}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), 0);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK_STR_EQ(result, "3\tl3\n4\tl4\n");
+	free(result);
+
+	/* offset only: from the given line to EOF (width 2 because the
+	 * last emitted line number is 10). */
+	result = NULL;
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"offset\":9}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), 0);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK_STR_EQ(result, " 9\tl9\n10\tl10\n");
+	free(result);
+
+	/* limit only: the first N lines. */
+	result = NULL;
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"limit\":2}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), 0);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK_STR_EQ(result, "1\tl1\n2\tl2\n");
+	free(result);
+
+	/* Exact fit: the range ends on the last line, no clamp note. */
+	result = NULL;
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"offset\":9,\"limit\":2}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), 0);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK_STR_EQ(result, " 9\tl9\n10\tl10\n");
+	free(result);
+
+	/* offset beyond EOF: empty result plus the clamp note. */
+	result = NULL;
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"offset\":11}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), 0);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK_STR_EQ(result, "[file has 10 lines]");
+	free(result);
+
+	/* Range partially beyond EOF: available lines plus the note. */
+	result = NULL;
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"offset\":9,\"limit\":5}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), 0);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK_STR_EQ(result, " 9\tl9\n10\tl10\n[file has 10 lines]");
+	free(result);
+
+	/* Empty file: clamp note with 0 lines. */
+	remove_tmp_file();
+	fopen(TMP_FILE, "wb");
+	TEST_CHECK(fopen(TMP_FILE, "rb") != NULL);
+	result = NULL;
+	snprintf(args, sizeof args, "{\"path\":\"" TMP_FILE "\"}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), 0);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK_STR_EQ(result, "[file has 0 lines]");
+	free(result);
+
+	remove_tmp_file();
+	tools_registry_free(reg);
+}
+
+static void test_read_file_invalid_range(void)
+{
+	tool_registry_t *reg = NULL;
+	const tool_def_t *def;
+	char *result = NULL;
+	char args[128];
+
+	remove_tmp_file();
+	TEST_CHECK_INT_EQ((long long)tools_registry_init(&reg), 0);
+	TEST_CHECK_INT_EQ((long long)tools_register_builtins(reg), 0);
+	def = tools_find(reg, "read_file");
+	write_numbered_lines(3);
+
+	/* offset == 0. */
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"offset\":0}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), -1);
+	TEST_CHECK_NOT_NULL(result);
+	free(result);
+
+	/* Negative limit. */
+	result = NULL;
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"limit\":-3}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), -1);
+	TEST_CHECK_NOT_NULL(result);
+	free(result);
+
+	/* limit == 0. */
+	result = NULL;
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"limit\":0}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), -1);
+	TEST_CHECK_NOT_NULL(result);
+	free(result);
+
+	/* Non-integer values. */
+	result = NULL;
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"offset\":2.5}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), -1);
+	TEST_CHECK_NOT_NULL(result);
+	free(result);
+
+	result = NULL;
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"limit\":\"3\"}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), -1);
+	TEST_CHECK_NOT_NULL(result);
+	free(result);
+
+	remove_tmp_file();
+	tools_registry_free(reg);
+}
+
+static void test_read_file_number_padding(void)
+{
+	tool_registry_t *reg = NULL;
+	const tool_def_t *def;
+	char *result = NULL;
+	char args[128];
+
+	remove_tmp_file();
+	TEST_CHECK_INT_EQ((long long)tools_registry_init(&reg), 0);
+	TEST_CHECK_INT_EQ((long long)tools_register_builtins(reg), 0);
+	def = tools_find(reg, "read_file");
+
+	/* 10 lines: the last number has two digits, so all are
+	 * right-aligned to width 2. */
+	write_numbered_lines(10);
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"offset\":9,\"limit\":2}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), 0);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK_STR_EQ(result, " 9\tl9\n10\tl10\n");
+	free(result);
+
+	/* 100 lines: width 3. */
+	remove_tmp_file();
+	write_numbered_lines(100);
+	result = NULL;
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"offset\":99,\"limit\":2}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), 0);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK_STR_EQ(result, " 99\tl99\n100\tl100\n");
+	free(result);
+
+	remove_tmp_file();
+	tools_registry_free(reg);
+}
+
+static void test_read_file_output_truncated(void)
+{
+	tool_registry_t *reg = NULL;
+	const tool_def_t *def;
+	char *result = NULL;
+	char args[128];
+	FILE *fp;
+
+	remove_tmp_file();
+	TEST_CHECK_INT_EQ((long long)tools_registry_init(&reg), 0);
+	TEST_CHECK_INT_EQ((long long)tools_register_builtins(reg), 0);
+	def = tools_find(reg, "read_file");
+
+	/* ~40000 lines overflow TOOLS_RESULT_MAX even in range mode. */
+	fp = fopen(TMP_FILE, "wb");
+	if (fp != NULL) {
+		for (int i = 0; i < 40000; ++i)
+			fputs("012345678\n", fp);
+		fclose(fp);
+	}
+	TEST_CHECK(fp != NULL);
+	snprintf(args, sizeof args,
+		 "{\"path\":\"" TMP_FILE "\",\"offset\":1}");
+	TEST_CHECK_INT_EQ((long long)def->handler(def, args, &result), 0);
+	TEST_CHECK_NOT_NULL(result);
+	TEST_CHECK(strlen(result) <= (size_t)TOOLS_RESULT_MAX);
+	TEST_CHECK(strstr(result, "[output truncated]") != NULL);
+	free(result);
+
 	remove_tmp_file();
 	tools_registry_free(reg);
 }
@@ -342,7 +576,7 @@ static void test_write_file_success(void)
 	TEST_CHECK_INT_EQ((long long)def->handler(
 			      def, "{\"path\":\"" TMP_FILE "\"}", &result),
 			  0);
-	TEST_CHECK_STR_EQ(result, "hello\nworld");
+	TEST_CHECK_STR_EQ(result, "1\thello\n2\tworld");
 	free(result);
 
 	remove_tmp_file();
@@ -457,6 +691,10 @@ int main(void)
 	TEST_RUN(test_build_json);
 	TEST_RUN(test_builtins_registered);
 	TEST_RUN(test_read_file_success);
+	TEST_RUN(test_read_file_range);
+	TEST_RUN(test_read_file_invalid_range);
+	TEST_RUN(test_read_file_number_padding);
+	TEST_RUN(test_read_file_output_truncated);
 	TEST_RUN(test_read_file_errors);
 	TEST_RUN(test_write_file_success);
 	TEST_RUN(test_write_file_errors);
